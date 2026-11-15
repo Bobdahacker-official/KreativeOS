@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build a partitioned FAT16 UEFI boot image without third-party tooling."""
 from pathlib import Path
-import struct
+import struct, os
 ROOT = Path(__file__).resolve().parent.parent
-out = ROOT / 'build'
+out = ROOT / os.environ.get('KREATIVE_BUILD_DIR', 'build')
 loader = (out / 'esp/EFI/BOOT/BOOTX64.EFI').read_bytes()
 sector = 512
 start = 2048

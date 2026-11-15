@@ -19,6 +19,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y qemu-system-x86 ovmf
       - name: Boot once and capture desktop
         run: python3 scripts/smoke.py
+      - name: Verify HTTPS and certificate rejection
+        run: python3 scripts/tls_check.py
       - name: Upload boot image and build evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -31,6 +33,7 @@ jobs:
             build/SHA256SUMS
             build/desktop.png
             build/serial.log
+            build/tls-check.log
       - name: Upload formatted Rust source
         uses: actions/upload-artifact@v4
         with:

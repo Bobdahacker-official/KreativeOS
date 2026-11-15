@@ -1,6 +1,9 @@
 #![no_std]
 #![no_main]
 #![allow(static_mut_refs)]
+extern crate alloc;
+mod memory;
+mod secure;
 mod boot;
 mod desktop;
 mod graphics;
@@ -15,9 +18,13 @@ pub unsafe extern "efiapi" fn efi_main(image: usize, system: *mut boot::SystemTa
     hardware::log(b"KreativeOS: UEFI entry\r\n");
     if let Some(screen) = boot::prepare(image, system) {
         hardware::log(b"KreativeOS: boot services exited\r\n");
+        memory::init();
+        graphics::init();
         hardware::init();
         storage::init();
-        let network = net::Network::new();
+        let mut network = net::Network::new();
+        #[cfg(feature = "tls-smoke")]
+        secure::smoke(&mut network);
         desktop::run(screen, network);
     }
     1

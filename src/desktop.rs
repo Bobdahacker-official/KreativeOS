@@ -6,10 +6,10 @@ use crate::{
     text::Text,
 };
 use core::fmt::Write;
-const INK: u32 = 0xe4edf7;
-const MUTED: u32 = 0x94a8bd;
-const PANEL: u32 = 0x152538;
-const SURFACE: u32 = 0x1d3046;
+const INK: u32 = 0x29334a;
+const MUTED: u32 = 0x7b8192;
+const PANEL: u32 = 0xf5f6fa;
+const SURFACE: u32 = 0xe7eaf2;
 const NAMES: [&str; 11] = [
     "Files",
     "Notes",
@@ -112,6 +112,7 @@ impl Snake {
 static mut PAINT: [u32; 320 * 180] = [0xf2f0e9; 320 * 180];
 struct Desktop {
     windows: [Window; 12],
+    restore: [Option<Window>;12],
     order: [usize; 12],
     focus: usize,
     menu: bool,
@@ -143,6 +144,7 @@ impl Desktop {
     fn new(w: usize, h: usize) -> Self {
         let mut d = Self {
             windows: [Window::new(); 12],
+            restore: [None;12],
             order: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             focus: 0,
             menu: false,
@@ -150,7 +152,7 @@ impl Desktop {
             my: 380,
             buttons: 0,
             drag: None,
-            accent: 0x51dbc4,
+            accent: 0x6377df,
             note: Text::new(),
             filename: Text::new(),
             terminal: Text::new(),
@@ -184,7 +186,9 @@ impl Desktop {
             .set("KreativeOS shell\nType help to see commands.\n");
         d.url.set("file:Readme.html");
         d.load_local();
-        d.open(1);
+        d.windows[0]=Window{open:false,min:false,x:64,y:102,w:510,h:430};
+        d.windows[1]=Window{open:false,min:false,x:(w as i32-650).max(170),y:160,w:600,h:440};
+        d.open(0);d.open(1);
         if let Some(i) = storage::find("Guide.app") {
             unsafe { d.package = storage::FILES[i].data }
             d.installed = true
@@ -383,37 +387,20 @@ impl Desktop {
         if click {
             let x = self.mx;
             let y = self.my;
-            let bar = s.h as i32 - 54;
-            if y >= bar {
-                if x < 74 {
-                    self.menu = !self.menu;
-                    return;
-                }
-                let count = self.windows.iter().filter(|a| a.open).count().max(1) as i32;
-                let width = ((s.w as i32 - 190) / count).min(74);
-                if x >= 80 && x < s.w as i32 - 110 {
-                    let slot = ((x - 80) / width) as usize;
-                    if let Some(id) = (0..12).filter(|&i| self.windows[i].open).nth(slot) {
-                        self.open(id)
-                    }
-                }
+            let dock_x=(s.w as i32-696)/2;
+            if y>=s.h as i32-86 && x>=dock_x && x<dock_x+696 {
+                let slot=((x-dock_x-12).max(0)/56) as usize;
+                if slot==0 {self.menu=!self.menu;} else if slot<=11 {self.open(slot-1);}
                 return;
             }
+            if y<32 {if x<140{self.menu=!self.menu;}return;}
             if self.menu {
-                let top = bar - 420;
-                if x >= 14 && x < 350 && y >= top {
-                    let id = ((y - top - 56) / 29) as usize;
-                    if y >= top + 56 && id < 11 {
-                        self.open(id);
-                        return;
-                    }
-                    if y >= top + 56 && id == 11 && self.installed {
-                        self.open(11);
-                        return;
-                    }
+                let left=(s.w as i32-640)/2;let top=(s.h as i32-450)/2;
+                if x>=left+24&&x<left+616&&y>=top+80&&y<top+410 {
+                    let col=((x-left-24)/148)as usize;let row=((y-top-80)/110)as usize;let id=row*4+col;
+                    if id<11||(id==11&&self.installed){self.open(id);return}
                 }
-                self.menu = false;
-                return;
+                self.menu=false;return;
             }
             for j in (0..12).rev() {
                 let id = self.order[j];
@@ -425,10 +412,12 @@ impl Desktop {
                 let lx = x - w.x;
                 let ly = y - w.y;
                 if ly < 38 {
-                    if lx > w.w - 36 {
+                    if (12..32).contains(&lx) {
                         self.windows[id].open = false
-                    } else if lx > w.w - 70 {
+                    } else if (34..54).contains(&lx) {
                         self.windows[id].min = true
+                    } else if (56..76).contains(&lx) {
+                        if let Some(old)=self.restore[id].take(){self.windows[id]=old;}else{self.restore[id]=Some(w);self.windows[id]=Window{open:true,min:false,x:24,y:46,w:s.w as i32-48,h:s.h as i32-150};}
                     } else {
                         self.drag = Some((id, lx, ly))
                     }
@@ -457,8 +446,8 @@ impl Desktop {
     fn app_click(&mut self, id: usize, x: i32, y: i32, n: &mut Network) {
         match id {
             0 => {
-                if y >= 100 {
-                    let row = ((y - 100) / 28) as usize;
+                if y >= 128 && x>=154 {
+                    let row = ((y - 128) / 42) as usize;
                     let found = unsafe {
                         storage::FILES
                             .iter()
@@ -600,141 +589,51 @@ impl Desktop {
             _ => (),
         }
     }
-    fn draw(&self, s: &mut Screen, n: &Network) {
-        let w = s.w as i32;
-        let h = s.h as i32;
-        for y in 0..h {
-            let v = (y * 20 / h) as u32;
-            s.rect(0, y, w, 1, ((8 + v) << 16) | ((21 + v) << 8) | (36 + v))
+    fn draw(&self,s:&mut Screen,n:&Network){
+        let w=s.w as i32;let h=s.h as i32;s.wallpaper();
+        s.tint(0,0,w,32,0xf5efff,145);
+        s.text(20,6,"K",0x33364e,2);s.text(48,6,"KreativeOS",0x33364e,2);
+        s.text(160,7,if self.focus<11{NAMES[self.focus]}else{"Guide"},0x4c4964,1);
+        s.text(250,7,"File    Edit    View    Window",0x4c4964,1);
+        let (hh,mm,_)=hardware::clock();let mut time:Text<32>=Text::new();let _=write!(time,"{:02}:{:02}",hh,mm);
+        s.text(w-62,7,time.str(),0x3b3d55,1);s.text(w-157,7,if n.io!=0{"Ethernet"}else{"Offline"},0x3b3d55,1);
+        for &id in &self.order {let a=self.windows[id];if a.open&&!a.min{self.window(s,n,id,a)}}
+        let dock_x=(w-696)/2;let dock_y=h-86;
+        s.shadow(dock_x,dock_y,696,72);s.rounded(dock_x,dock_y,696,72,20,0xf8f5ff,155);
+        s.rounded(dock_x+1,dock_y+1,694,70,19,0xffffff,28);
+        for slot in 0..12 {let id=if slot==0{11}else{slot-1};let x=dock_x+12+slot as i32*56;let hover=self.mx>=x&&self.mx<x+56&&self.my>=dock_y-4;
+            let size=if hover{50}else{46};s.icon(x+4,dock_y+9-if hover{3}else{0},id,size);
+            if slot>0&&self.windows[id].open{s.circle(x+27,dock_y+64,2,0x52516e)}
+            if hover{let label=if slot==0{"Applications"}else{NAMES[id]};let tw=crate::graphics::text_width(label,1);s.rounded(x+27-tw/2-10,dock_y-32,tw+20,25,8,0xf9f8ff,235);s.text(x+27-tw/2,dock_y-28,label,INK,1);}
         }
-        for i in 0..6 {
-            s.line(w - 430 + i * 48, 0, w, h - 120 - i * 55, 0x18374b)
-        }
-        s.text(32, 32, "KREATIVE", 0x86b9c6, 3);
-        s.text(34, 62, "SPACE FOR YOUR IDEAS", 0x547d92, 1);
-        for &id in &self.order {
-            let a = self.windows[id];
-            if a.open && !a.min {
-                self.window(s, n, id, a)
-            }
-        }
-        s.rect(0, h - 56, w, 56, 0x0b1725);
-        s.rect(0, h - 56, w, 1, 0x294559);
-        s.round(12, h - 44, 52, 34, self.accent);
-        s.text(28, h - 36, "K", 0x102435, 3);
-        let count = self.windows.iter().filter(|a| a.open).count().max(1) as i32;
-        let width = ((w - 190) / count).min(74);
-        let mut slot = 0;
-        for id in 0..12 {
-            if self.windows[id].open {
-                let x = 80 + slot * width;
-                slot += 1;
-                s.round(
-                    x,
-                    h - 44,
-                    width - 6,
-                    34,
-                    if self.focus == id && !self.windows[id].min {
-                        SURFACE
-                    } else {
-                        0x0b1725
-                    },
-                );
-                s.text(
-                    x + 7,
-                    h - 31,
-                    if id < 11 { NAMES[id] } else { "Guide" },
-                    INK,
-                    1,
-                );
-                if self.focus == id {
-                    s.rect(x + 20, h - 8, 28, 3, self.accent)
-                }
-            }
-        }
-        let (hh, mm, _) = hardware::clock();
-        let mut time: Text<16> = Text::new();
-        let _ = write!(time, "{:02}:{:02}", hh, mm);
-        s.text(w - 80, h - 36, time.str(), INK, 2);
-        s.text(
-            w - 80,
-            h - 17,
-            if n.io == 0 { "OFFLINE" } else { "ETHERNET" },
-            MUTED,
-            1,
-        );
-        if self.menu {
-            let top = h - 54 - 420;
-            s.round(14, top, 336, 410, PANEL);
-            s.text(34, top + 18, "YOUR APPS", self.accent, 2);
-            for i in 0..11 {
-                s.text(36, top + 56 + i as i32 * 29, NAMES[i], INK, 2)
-            }
-            if self.installed {
-                s.text(36, top + 56 + 11 * 29, "Kreative Guide", self.accent, 2)
-            }
-        }
-        for i in 0..18 {
-            s.line(self.mx, self.my + i, self.mx + i / 2, self.my + i, 0xf6ffff)
-        }
-        s.line(self.mx, self.my, self.mx + 9, self.my + 17, 0x0a1724);
-        s.line(self.mx, self.my, self.mx, self.my + 19, 0x0a1724);
-        s.line(
-            self.mx + 5,
-            self.my + 13,
-            self.mx + 10,
-            self.my + 24,
-            0xf6ffff,
-        );
+        if self.menu {let left=(w-640)/2;let top=(h-450)/2;s.shadow(left,top,640,420);s.rounded(left,top,640,420,22,0xf8f7ff,242);s.text(left+30,top+25,"Your applications",INK,3);s.text(left+360,top+32,"A place for everything.",MUTED,1);
+            for id in 0..12 {if id==11&&!self.installed{continue}let x=left+24+(id%4)as i32*148;let y=top+80+(id/4)as i32*110;s.icon(x+48,y,id,48);let label=if id<11{NAMES[id]}else{"Kreative Guide"};let tw=crate::graphics::text_width(label,1);s.text(x+72-tw/2,y+58,label,INK,1);}}
+        s.cursor(self.mx,self.my);
     }
     fn window(&self, s: &mut Screen, n: &Network, id: usize, a: Window) {
         let x = a.x;
         let y = a.y;
         let w = a.w;
         let h = a.h;
-        s.round(x + 6, y + 7, w, h, 0x06101b);
-        s.round(x, y, w, h, PANEL);
-        s.rect(x + 1, y + 37, w - 2, 1, 0x365066);
-        s.text(
-            x + 18,
-            y + 12,
-            if id < 11 { NAMES[id] } else { "Kreative Guide" },
-            if id == self.focus { self.accent } else { INK },
-            2,
-        );
-        s.text(x + w - 59, y + 13, "_", MUTED, 2);
-        s.text(x + w - 27, y + 12, "X", 0xf1959b, 2);
+        s.shadow(x,y,w,h);s.rounded(x,y,w,h,14,PANEL,255);
+        s.rounded(x+1,y+1,w-2,37,13,0xffffff,165);
+        s.rect(x+1,y+37,w-2,1,0xe2e4ec);
+        for (dx,c) in [(22,0xff6a61),(44,0xf5bd4f),(66,0x60c653)]{s.circle(x+dx,y+19,7,c);}
+        let title=if id<11{NAMES[id]}else{"Kreative Guide"};let tw=crate::graphics::text_width(title,2);s.text(x+(w-tw)/2,y+8,title,INK,2);
         match id {
-            0 => {
-                s.text(x + 20, y + 57, "LOCAL FILES", self.accent, 2);
-                s.text(x + 20, y + 80, "SELECT A FILE TO OPEN", MUTED, 1);
-                let mut row = 0;
-                unsafe {
-                    for f in &storage::FILES {
-                        if f.used {
-                            let yy = y + 100 + row * 28;
-                            if yy + 26 > y + h {
-                                break;
-                            }
-                            if row % 2 == 0 {
-                                s.rect(x + 12, yy - 4, w - 24, 27, SURFACE)
-                            }
-                            s.text(x + 24, yy, f.name.str(), INK, 2);
-                            let mut size: Text<32> = Text::new();
-                            let _ = write!(size, "{} B", f.data.len);
-                            s.text(x + w - 110, yy, size.str(), MUTED, 1);
-                            row += 1
-                        }
-                    }
-                }
+            0=>{
+                s.rect(x+1,y+39,142,h-54,0xebedf6);s.text(x+18,y+59,"Favorites",MUTED,1);
+                for (row,label) in ["Recents","Documents","Downloads","Applications"].iter().enumerate(){let yy=y+92+row as i32*36;if row==1{s.rounded(x+9,yy-5,126,30,7,0xd7ddf4,255)}s.text(x+22,yy,label,if row==1{0x4d63ae}else{0x6c7287},1);}
+                s.text(x+164,y+58,"Documents",INK,3);s.text(x+165,y+88,"Your local workspace",MUTED,1);
+                let mut row=0;unsafe{for f in &storage::FILES{if f.used{let yy=y+128+row*42;if yy+30>y+h{break}s.rounded(x+163,yy-2,w-180,36,7,if row%2==0{0xffffff}else{PANEL},255);s.rounded(x+173,yy+3,16,21,3,0xdce5f8,255);s.text(x+200,yy+1,f.name.str(),INK,1);row+=1;}}}
+                s.text(x+18,y+h-38,"On this computer",MUTED,1);
             }
-            1 => {
-                button(s, x + 16, y + 48, 90, "SAVE", self.accent);
-                button(s, x + 120, y + 48, 90, "NEW", SURFACE);
-                s.text(x + 230, y + 59, self.filename.str(), MUTED, 1);
-                s.rect(x + 16, y + 94, w - 32, h - 150, 0x0d1c2b);
-                s.wrapped(x + 26, y + 106, w - 52, h - 174, self.note.str(), INK);
-                s.text(x + 20, y + h - 35, self.notice.str(), self.accent, 1);
+            1=>{
+                button(s,x+16,y+48,90,"Save",self.accent);button(s,x+120,y+48,90,"New",SURFACE);s.text(x+230,y+58,self.filename.str(),MUTED,1);
+                s.rounded(x+16,y+94,w-32,h-144,10,0xffffff,255);
+                let (heading,body)=self.note.str().split_once('\n').unwrap_or((self.note.str(),""));
+                s.text(x+36,y+112,heading,INK,3);s.wrapped(x+36,y+155,w-72,h-220,body,0x6e7588);
+                s.text(x+22,y+h-34,if self.notice.len>0{self.notice.str()}else{"All your ideas start somewhere."},MUTED,1);
             }
             2 => {
                 s.rect(x + 12, y + 48, w - 24, h - 95, 0x07111d);
@@ -745,7 +644,7 @@ impl Desktop {
                 s.text(x + 46, y + h - 32, self.command.str(), INK, 2);
             }
             3 => {
-                s.rect(x + 14, y + 48, w - 110, 32, 0x0b1a29);
+                s.rounded(x + 14, y + 48, w - 110, 32, 9, 0xffffff,255);
                 let u = self.url.str();
                 s.text(
                     x + 21,
@@ -759,7 +658,7 @@ impl Desktop {
                     1,
                 );
                 button(s, x + w - 86, y + 48, 72, "GO", self.accent);
-                s.rect(x + 14, y + 95, w - 28, h - 143, 0xe7edf0);
+                s.rect(x + 14, y + 95, w - 28, h - 143, 0xffffff);
                 let start = self.scroll.min(self.page.len);
                 s.wrapped(
                     x + 26,
@@ -773,14 +672,14 @@ impl Desktop {
                     x + 20,
                     y + h - 31,
                     if self.url.str().starts_with("file:") {
-                        "LOCAL DOCUMENT"
+                        "Local document"
                     } else {
                         n.status
                     },
                     MUTED,
                     1,
                 );
-                s.text(x + w - 116, y + h - 31, "SCROLL DOWN", self.accent, 1);
+                s.text(x + w - 116, y + h - 31, "Scroll down", self.accent, 1);
             }
             4 => {
                 s.text(x + 24, y + 63, self.calc.str(), INK, 2);
@@ -857,7 +756,7 @@ impl Desktop {
                 );
             }
             7 => {
-                s.text(x + 24, y + 62, "LOCAL PACKAGES", self.accent, 2);
+                s.text(x + 24, y + 62, "Local packages", self.accent, 2);
                 s.wrapped(
                     x + 24,
                     y + 94,
@@ -873,13 +772,13 @@ impl Desktop {
                 s.wrapped(x + 24, y + 285, w - 48, 100, self.notice.str(), INK);
             }
             8 => {
-                s.text(x + 24, y + 64, "CONNECTIONS", self.accent, 2);
+                s.text(x + 24, y + 64, "Connections", self.accent, 2);
                 let mut details: Text<1024> = Text::new();
                 let _=write!(details,"{}\n\nEthernet: RTL8139\nIPv4: 10.0.2.15 / 24\nGateway: 10.0.2.2\nDNS: 10.0.2.3\n\nMAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}\nFrames received: {}\nFrames sent: {}\n\nWi-Fi PCI devices: {}\nWi-Fi radio driver: not installed",n.status,n.mac[0],n.mac[1],n.mac[2],n.mac[3],n.mac[4],n.mac[5],n.received,n.sent,n.wifi_devices);
                 s.wrapped(x + 24, y + 106, w - 48, h - 130, details.str(), INK);
             }
             9 => {
-                s.text(x + 24, y + 64, "MAKE IT YOURS", self.accent, 2);
+                s.text(x + 24, y + 64, "Make it yours", self.accent, 2);
                 button(s, x + 24, y + 120, 150, "MINT", 0x51dbc4);
                 button(s, x + 220, y + 120, 150, "LILAC", 0xa29bfe);
                 button(s, x + 420, y + 120, 150, "AMBER", 0xffb870);
@@ -936,7 +835,7 @@ fn button(s: &mut Screen, x: i32, y: i32, w: i32, label: &str, c: u32) {
         x + 12,
         y + 12,
         label,
-        if c == SURFACE { INK } else { 0x102437 },
+        if c == SURFACE { INK } else { 0xffffff },
         1,
     )
 }
@@ -994,6 +893,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
             }
         }
         network.poll();
+        if network.tls_pending {desktop.draw(&mut s,&network);s.present();crate::secure::fetch(&mut network);}
         if network.changed {
             network.changed = false;
             if !desktop.url.str().starts_with("file:") {

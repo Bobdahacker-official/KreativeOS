@@ -127,7 +127,7 @@ pub unsafe fn init() {
         }
     }
     if find("Welcome.txt").is_none() {
-        let _=put("Welcome.txt",b"Welcome to KreativeOS.\n\nF1 Files  F2 Notes  F3 Terminal\nF4 Browser  F5 Calculator  F6 Paint\nF7 Snake  F8 Packages  F9 Network\n\nUse the taskbar to switch apps. Drag window titles.\nNotes: type, then click SAVE.\nTerminal: help lists commands.\nLocal packages: install a .kapp file in Packages.\n");
+        let _=put("Welcome.txt",b"Make something great.\n\nA quiet space for your next big idea.\n\nWrite a thought. Sketch a possibility. Open a new window.\n\nYour files stay on this computer, and your workspace is yours to make.\n\nWelcome to KreativeOS.");
     }
     if find("Guide.kapp").is_none() {
         let _ = put("Guide.kapp", include_bytes!("../packages/Guide.kapp"));
