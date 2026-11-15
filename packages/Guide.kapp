@@ -1,0 +1,24 @@
+KAPP1
+name=Kreative Guide
+version=1
+---
+KREATIVE GUIDE
+
+Your workspace, your ideas.
+
+FILES
+Select a document to open it in Notes.
+Use Terminal to create or remove files.
+
+NOTES
+Type text and choose SAVE. Data is committed to the dedicated KFS disk.
+
+BROWSER
+Enter an HTTP URL or file:Readme.html.
+Press Enter to load. Arrow keys scroll.
+
+PACKAGES
+Install local .kapp documents. Installed apps appear in the launcher.
+
+SNAKE
+Arrow keys steer. Space starts a new game.
