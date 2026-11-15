@@ -2,6 +2,12 @@
 
 KreativeOS is an independent x86-64 operating system written from scratch in Rust. It boots through UEFI, exits firmware boot services, and runs its own graphical desktop, input drivers, disk storage and Ethernet stack. It does not use a Linux kernel, a host operating system, or external Rust crates.
 
+## Download
+
+[Download the compiled KreativeOS boot bundle](dist/KreativeOS-x86_64.zip?raw=true). It includes the boot disk, blank data disk, EFI binary, checksums, serial log and captured desktop. Extract the bundle into `build/` to use `scripts/run.sh`.
+
+![KreativeOS desktop](docs/desktop.png)
+
 ## Build and boot
 
 Install stable Rust with the `x86_64-unknown-uefi` target, and Python 3:

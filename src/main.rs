@@ -2,11 +2,11 @@
 #![no_main]
 #![allow(static_mut_refs)]
 mod boot;
+mod desktop;
 mod graphics;
 mod hardware;
-mod storage;
 mod net;
-mod desktop;
+mod storage;
 mod text;
 
 #[no_mangle]
@@ -24,6 +24,12 @@ pub unsafe extern "efiapi" fn efi_main(image: usize, system: *mut boot::SystemTa
 }
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
-    unsafe { hardware::log(b"KreativeOS: kernel panic\r\n"); }
-    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+    unsafe {
+        hardware::log(b"KreativeOS: kernel panic\r\n");
+    }
+    loop {
+        unsafe {
+            core::arch::asm!("cli; hlt");
+        }
+    }
 }
