@@ -46,7 +46,7 @@ impl Desktop{
  fn mouse(&mut self,dx:i32,dy:i32,buttons:u8,s:&Screen,n:&mut Network){self.mx=(self.mx+dx).clamp(0,s.w as i32-1);self.my=(self.my+dy).clamp(0,s.h as i32-1);let click=buttons&1!=0&&self.buttons&1==0;self.buttons=buttons;if buttons&1==0{self.drag=None;self.last_paint=None}
  if let Some((id,ox,oy))=self.drag{self.windows[id].x=(self.mx-ox).clamp(0,s.w as i32-100);self.windows[id].y=(self.my-oy).clamp(0,s.h as i32-90);return}
  if click{let x=self.mx;let y=self.my;let bar=s.h as i32-54;
- if y>=bar{if x<74{self.menu=!self.menu;return}let id=((x-80)/74)as usize;if id<12&&self.windows[id].open{self.open(id)}return}
+ if y>=bar{if x<74{self.menu=!self.menu;return}let count=self.windows.iter().filter(|a|a.open).count().max(1) as i32;let width=((s.w as i32-190)/count).min(74);if x>=80&&x<s.w as i32-110 {let slot=((x-80)/width)as usize;if let Some(id)=(0..12).filter(|&i|self.windows[i].open).nth(slot){self.open(id)}}return}
  if self.menu{let top=bar-420;if x>=14&&x<350&&y>=top{let id=((y-top-56)/29)as usize;if y>=top+56&&id<11{self.open(id);return}if y>=top+56&&id==11&&self.installed{self.open(11);return}}self.menu=false;return}
  for j in (0..12).rev(){let id=self.order[j];let w=self.windows[id];if !w.open||w.min||!w.inside(x,y){continue}self.open(id);let lx=x-w.x;let ly=y-w.y;
  if ly<38{if lx>w.w-36{self.windows[id].open=false}else if lx>w.w-70{self.windows[id].min=true}else{self.drag=Some((id,lx,ly))}return}
@@ -68,7 +68,7 @@ impl Desktop{
  for i in 0..6{s.line(w-430+i*48,0,w,h-120-i*55,0x18374b)}s.text(32,32,"KREATIVE",0x86b9c6,3);s.text(34,62,"SPACE FOR YOUR IDEAS",0x547d92,1);
  for &id in &self.order{let a=self.windows[id];if a.open&&!a.min{self.window(s,n,id,a)}}
  s.rect(0,h-56,w,56,0x0b1725);s.rect(0,h-56,w,1,0x294559);s.round(12,h-44,52,34,self.accent);s.text(28,h-36,"K",0x102435,3);
- for id in 0..12{if self.windows[id].open{let x=80+id as i32*74;if x+70>w-100{continue}s.round(x,h-44,68,34,if self.focus==id&&!self.windows[id].min{SURFACE}else{0x0b1725});s.text(x+7,h-31,if id<11{NAMES[id]}else{"Guide"},INK,1);if self.focus==id{s.rect(x+20,h-8,28,3,self.accent)}}}
+ let count=self.windows.iter().filter(|a|a.open).count().max(1) as i32;let width=((w-190)/count).min(74);let mut slot=0;for id in 0..12{if self.windows[id].open{let x=80+slot*width;slot+=1;s.round(x,h-44,width-6,34,if self.focus==id&&!self.windows[id].min{SURFACE}else{0x0b1725});s.text(x+7,h-31,if id<11{NAMES[id]}else{"Guide"},INK,1);if self.focus==id{s.rect(x+20,h-8,28,3,self.accent)}}}
  let (hh,mm,_)=hardware::clock();let mut time:Text<16>=Text::new();let _=write!(time,"{:02}:{:02}",hh,mm);s.text(w-80,h-36,time.str(),INK,2);s.text(w-80,h-17,if n.io==0{"OFFLINE"}else{"ETHERNET"},MUTED,1);
  if self.menu{let top=h-54-420;s.round(14,top,336,410,PANEL);s.text(34,top+18,"YOUR APPS",self.accent,2);for i in 0..11{s.text(36,top+56+i as i32*29,NAMES[i],INK,2)}if self.installed{s.text(36,top+56+11*29,"Kreative Guide",self.accent,2)}}
  for i in 0..18{s.line(self.mx,self.my+i,self.mx+i/2,self.my+i,0xf6ffff)}s.line(self.mx,self.my,self.mx+9,self.my+17,0x0a1724);s.line(self.mx,self.my,self.mx,self.my+19,0x0a1724);s.line(self.mx+5,self.my+13,self.mx+10,self.my+24,0xf6ffff);

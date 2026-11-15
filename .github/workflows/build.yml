@@ -31,3 +31,10 @@ jobs:
             build/SHA256SUMS
             build/desktop.png
             build/serial.log
+      - name: Upload formatted Rust source
+        uses: actions/upload-artifact@v4
+        with:
+          name: KreativeOS-source
+          path: |
+            src/
+            Cargo.lock

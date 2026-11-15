@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+cargo fmt --all
 cargo build --release --target x86_64-unknown-uefi
 mkdir -p build/esp/EFI/BOOT
 cp target/x86_64-unknown-uefi/release/kreativeos.efi build/esp/EFI/BOOT/BOOTX64.EFI

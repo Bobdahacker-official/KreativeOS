@@ -44,5 +44,5 @@ impl Input {
 }
 pub unsafe fn pci(bus:u8,slot:u8,func:u8,reg:u8)->u32{out32(0xcf8,0x80000000|((bus as u32)<<16)|((slot as u32)<<11)|((func as u32)<<8)|(reg as u32&0xfc));in32(0xcfc)}
 pub unsafe fn pci_write(bus:u8,slot:u8,func:u8,reg:u8,v:u32){out32(0xcf8,0x80000000|((bus as u32)<<16)|((slot as u32)<<11)|((func as u32)<<8)|(reg as u32&0xfc));out32(0xcfc,v)}
-pub fn clock()->(u8,u8,u8){unsafe{fn read(r:u8)->u8{unsafe{out8(0x70,r);in8(0x71)}}let mode=read(0xb);let cv=|v:u8|if mode&4!=0{v}else{(v>>4)*10+(v&15)};let h=read(4);let mut hour=cv(h&127);if mode&2==0{hour=hour%12+if h&128!=0{12}else{0}}(hour,cv(read(2)),cv(read(0)))}}
+pub fn clock()->(u8,u8,u8){fn read(r:u8)->u8{unsafe{out8(0x70,r);in8(0x71)}}let mode=read(0xb);let cv=|v:u8|if mode&4!=0{v}else{(v>>4)*10+(v&15)};let h=read(4);let mut hour=cv(h&127);if mode&2==0{hour=hour%12+if h&128!=0{12}else{0}}(hour,cv(read(2)),cv(read(0)))}
 pub fn reboot()->!{unsafe{cmd(0xfe)}loop{core::hint::spin_loop()}}
