@@ -31,18 +31,18 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 
 ## Desktop
 
-- Antialiased Open Sans, a jade grid wallpaper, a full-width taskbar, and a two-column app launcher. Windows support dragging, minimizing, maximizing and closing.
+- tiny-skia vector icons, a composited pointer, antialiased Open Sans, a jade grid wallpaper, a full-width taskbar, and a two-column app launcher. Windows support dragging, minimizing, maximizing and closing.
 - PS/2 keyboard, standard PS/2 mice, and IntelliMouse-compatible scroll wheels.
 - Files and Notes with a persistent, checksummed, two-snapshot KFS volume.
 - Terminal with file operations, app launching, network status, calculation and reboot.
-- HTTP and HTTPS browser with DNS resolution, TCP requests, HTML-to-text rendering, local HTML documents and scrolling.
+- HTTP and HTTPS browser with DNS resolution, local HTML documents, inline images and WAV playback over HTTPS.
 - Calculator with checked integer arithmetic, operator precedence and parentheses.
 - Images opens PNG, JPEG and uncompressed BMP at fit or actual size. The gallery imports packs from the boot disk and firmware-mounted USB storage.
 - Paint with a color palette, continuous strokes and clear canvas.
 - Snake with food, scoring, self-collision, wall collision and restart.
 - Two-player Tic Tac Toe with turn management, win detection and restart.
 - Local KAPP1 document packages, installation persistence and a launcher entry.
-- Network status with real Ethernet counters, MAC address and PCI Wi-Fi device discovery.
+- Network settings for Ethernet and ESP-AT Wi-Fi.
 - Settings with three accent colors, save-all and restart.
 
 F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
@@ -51,9 +51,17 @@ F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches 
 
 The supplied configuration uses QEMU user networking: IPv4 `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`. Ethernet supports PCI RTL8139 and Intel PRO/1000 MT Desktop (82540EM). QEMU defaults to RTL8139. Set `NIC_MODEL=e1000` to select the Intel adapter. The stack implements Ethernet, ARP, IPv4 validation, UDP DNS lookup and a single bounded TCP/HTTP connection with retransmission and timeout handling.
 
-Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. Browser output is text, capped at 12 KiB. HTTP uses port 80 and HTTP/1.0 connection-close semantics. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. JavaScript, CSS layout, DHCP and Wi-Fi radio association are not implemented. Wi-Fi devices are counted through PCI discovery; the Network app reports driver availability accurately.
+Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. The browser shows page text, the first compatible HTML image and a Play sound button for the first WAV audio source. Direct HTTPS links to PNG, JPEG, BMP and WAV also open. Media responses are capped at 768 KiB. HTTP uses port 80 and HTTP/1.0 connection-close semantics. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. The browser supports authenticated HTTPS redirects and chunked response bodies. Plain HTTP uses the Ethernet interface.
 
-The kernel is a single-address-space system with a cooperative app event loop and polled drivers. It currently uses firmware-established CPU mappings. USB input, audio, process isolation, SMP and general-purpose native executable loading are not implemented. Paint content stays in memory. KAPP packages contain document apps, not native machine code.
+The kernel is a single-address-space system with a cooperative app event loop and polled drivers. It currently uses firmware-established CPU mappings. USB input, process isolation, SMP and general-purpose native executable loading are not implemented. Paint content stays in memory. KAPP packages contain document apps, not native machine code.
+
+## Wi-Fi and sound
+
+Connect an ESP32 running Espressif ESP-AT to COM2 using a UART adapter appropriate for the board and the PC port. The driver uses 115200 baud, 8 data bits, no parity and one stop bit. In **Network** enter the SSID and password, then select **Connect**. The module associates and gets its own IP address. HTTPS then uses the module's TCP transport with certificate and hostname checks inside KreativeOS.
+
+QEMU can attach an ESP-AT serial backend with `ESP_AT_SERIAL`. The integration check uses a local protocol fixture for this serial transport.
+
+The browser plays 16-bit PCM WAV through Intel ICH AC'97. QEMU adds the audio controller at boot. Set `AUDIO_SPEC=driver=pa` or another backend supported by your QEMU install if you want to select the host audio output explicitly.
 
 ## Import your images
 

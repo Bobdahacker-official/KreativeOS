@@ -8,7 +8,8 @@ pub static mut VOLUMES: [(usize, usize); 12] = [(0, 0); 12];
 pub struct Picture {
     pub width: usize,
     pub height: usize,
-    pub pixels: Vec<u32>,
+    pub pixmap: tiny_skia::Pixmap,
+    pub id: usize,
 }
 
 pub struct Catalog {
@@ -74,7 +75,7 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | b as u32
 }
 
-fn decode(data: &[u8]) -> Option<Picture> {
+pub fn decode(data: &[u8]) -> Option<Picture> {
     if data.starts_with(b"BM") {
         return bmp(data);
     }
@@ -133,11 +134,7 @@ fn decode(data: &[u8]) -> Option<Picture> {
             crate::graphics::mix(checker, pixel, alpha as u32)
         })
         .collect();
-    Some(Picture {
-        width,
-        height,
-        pixels,
-    })
+    finish(width, height, pixels)
 }
 
 fn bmp(data: &[u8]) -> Option<Picture> {
@@ -171,9 +168,20 @@ fn bmp(data: &[u8]) -> Option<Picture> {
             pixels.push(rgb(p[2], p[1], p[0]));
         }
     }
+    finish(width, height, pixels)
+}
+
+fn finish(width: usize, height: usize, pixels: Vec<u32>) -> Option<Picture> {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static ID: AtomicUsize = AtomicUsize::new(1);
+    let mut pixmap = tiny_skia::Pixmap::new(width as u32, height as u32)?;
+    for (to, c) in pixmap.data_mut().chunks_exact_mut(4).zip(pixels) {
+        to.copy_from_slice(&[(c >> 16) as u8, (c >> 8) as u8, c as u8, 255]);
+    }
     Some(Picture {
         width,
         height,
-        pixels,
+        pixmap,
+        id: ID.fetch_add(1, Ordering::Relaxed),
     })
 }

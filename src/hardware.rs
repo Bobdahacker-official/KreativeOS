@@ -174,11 +174,20 @@ impl Input {
                 self.pos += 1;
                 if self.pos == MOUSE_BYTES {
                     self.pos = 0;
-                    if self.packet[0] & 0xc0 != 0 {
-                        return None;
-                    }
-                    let dx = self.packet[1] as i32 - if self.packet[0] & 16 != 0 { 256 } else { 0 };
-                    let dy = self.packet[2] as i32 - if self.packet[0] & 32 != 0 { 256 } else { 0 };
+                    let axis = |byte: u8, sign: u8, overflow: u8| {
+                        let negative = self.packet[0] & sign != 0;
+                        if self.packet[0] & overflow != 0 {
+                            if negative {
+                                -255
+                            } else {
+                                255
+                            }
+                        } else {
+                            i32::from(byte) - if negative { 256 } else { 0 }
+                        }
+                    };
+                    let dx = axis(self.packet[1], 16, 64);
+                    let dy = axis(self.packet[2], 32, 128);
                     let wheel = if MOUSE_BYTES == 4 {
                         -(((self.packet[3] << 4) as i8 >> 4) as i32)
                     } else {

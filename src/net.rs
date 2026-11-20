@@ -33,10 +33,11 @@ fn fold(mut s: u32) -> u16 {
 pub struct Network {
     io: u16,
     intel: Option<crate::e1000::Adapter>,
+    pub wifi: crate::wifi::Module,
+    pub response: Option<crate::web::Response>,
     pub mac: [u8; 6],
     pub received: u64,
     pub sent: u64,
-    pub wifi_devices: u32,
     pub status: &'static str,
     pub body: Text<12288>,
     pub changed: bool,
@@ -49,7 +50,7 @@ pub struct Network {
     pub path: Text<256>,
     pub state: u8,
     secure: bool,
-    remote_port: u16,
+    pub remote_port: u16,
     pub tls_pending: bool,
     pub verified: bool,
     pub cert_rejected: bool,
@@ -68,11 +69,12 @@ impl Network {
     pub unsafe fn new() -> Self {
         let mut n = Self {
             io: 0,
+            wifi: crate::wifi::Module::new(),
+            response: None,
             intel: None,
             mac: [0; 6],
             received: 0,
             sent: 0,
-            wifi_devices: 0,
             status: "No supported Ethernet adapter",
             body: Text::new(),
             changed: true,
@@ -107,10 +109,6 @@ impl Network {
                     let id = pci(bus, slot, func, 0);
                     if id == 0xffff_ffff {
                         continue;
-                    }
-                    let class = pci(bus, slot, func, 8);
-                    if class >> 16 == 0x0280 {
-                        n.wifi_devices += 1
                     }
                     if id == 0x100e8086 && intel_slot.is_none() {
                         intel_slot = Some((bus, slot, func));
@@ -306,6 +304,7 @@ impl Network {
     }
     pub fn browse(&mut self, url: &str) {
         self.body.clear();
+        self.response = None;
         self.verified = false;
         self.cert_rejected = false;
         self.tls_pending = false;
@@ -315,8 +314,8 @@ impl Network {
         self.changed = true;
         self.have_gateway = false;
         self.last_len = 0;
-        if !self.online() {
-            self.fail("No Ethernet adapter");
+        if !self.online() && !self.wifi.joined {
+            self.fail("Connect Ethernet or Wi-Fi");
             return;
         }
         let s = if let Some(v) = url.strip_prefix("https://") {
@@ -348,7 +347,9 @@ impl Network {
         };
         if host.len() > 127
             || path.len() > 250
-            || host.contains(':')
+            || !host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
             || host.is_empty()
             || !s.bytes().all(|b| b >= 33 && b < 127)
         {
@@ -358,6 +359,20 @@ impl Network {
         self.host.set(host);
         self.path.set("/");
         self.path.append(path);
+        if self.wifi.joined && self.secure {
+            self.status = "Connecting over Wi-Fi";
+            if self.wifi.connect(host, self.remote_port).is_ok() {
+                self.state = 6;
+                self.tls_pending = true;
+            } else {
+                self.fail("Wi-Fi TCP connection failed");
+            }
+            return;
+        }
+        if !self.online() {
+            self.fail("Use an HTTPS address over Wi-Fi");
+            return;
+        }
         self.remote = [0; 4];
         let mut octets = host.split('.');
         let mut numeric = true;
@@ -451,7 +466,9 @@ impl Network {
         self.raw_waiting = true;
     }
     pub fn tls_result(&mut self, verified: bool, status: &'static str) {
-        if self.state == 6 {
+        if self.wifi.active {
+            self.wifi.close();
+        } else if self.state == 6 {
             self.tcp(0x11, &[], false);
             self.seq = self.seq.wrapping_add(1);
         }

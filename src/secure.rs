@@ -186,6 +186,9 @@ impl embedded_io::ErrorType for Socket<'_> {
 }
 impl embedded_io::Read for Socket<'_> {
     fn read(&mut self, b: &mut [u8]) -> Result<usize, IoError> {
+        if self.0.wifi.active {
+            return self.0.wifi.read(b);
+        }
         if b.is_empty() {
             return Ok(0);
         }
@@ -211,6 +214,9 @@ impl embedded_io::Read for Socket<'_> {
 }
 impl embedded_io::Write for Socket<'_> {
     fn write(&mut self, b: &[u8]) -> Result<usize, IoError> {
+        if self.0.wifi.active {
+            return self.0.wifi.write(b);
+        }
         let n = b.len().min(1200);
         if n == 0 {
             return Ok(0);
@@ -238,7 +244,8 @@ pub fn fetch(n: &mut Network) {
     }
     let host = n.host;
     let path = n.path;
-    let result = (|| -> Result<Text<12288>, TlsError> {
+    let port = n.remote_port;
+    let result = (|| -> Result<crate::web::Response, TlsError> {
         let mut read = alloc::vec![0;18432];
         let mut write = alloc::vec![0;4096];
         let config = TlsConfig::new()
@@ -260,40 +267,51 @@ pub fn fetch(n: &mut Network) {
         request.append(path.str());
         request.append(" HTTP/1.0\r\nHost: ");
         request.append(host.str());
+        if port != 443 {
+            use core::fmt::Write;
+            let _ = write!(request, ":{}", port);
+        }
         request.append("\r\nUser-Agent: KreativeOS/0.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n");
         let mut offset = 0;
         while offset < request.len {
             offset += tls.write(&request.bytes[offset..request.len])?;
         }
         tls.flush()?;
-        let mut body: Text<12288> = Text::new();
-        let mut buf = [0; 2048];
+        let mut body = Vec::new();
+        let mut buf = [0; 4096];
+        let start = hardware::millis();
         loop {
+            if hardware::millis() - start > 30000 {
+                return Err(TlsError::Io(IoError::TimedOut));
+            }
             match tls.read(&mut buf) {
-                Ok(0) => break,
+                Ok(0) | Err(TlsError::ConnectionClosed) => break,
                 Ok(count) => {
-                    for &b in &buf[..count] {
-                        body.push(if b < 128 { b } else { b'?' })
+                    if body.len() + count > crate::web::MAX_RESPONSE {
+                        return Err(TlsError::InsufficientSpace);
                     }
-                    if complete(body.str()) || body.len == 12288 {
+                    body.extend_from_slice(&buf[..count]);
+                    if crate::web::complete(&body) {
                         break;
                     }
                 }
-                Err(e) => {
-                    if complete(body.str()) {
-                        break;
-                    } else {
-                        return Err(e);
-                    }
-                }
+                Err(e) => return Err(e),
             }
         }
         let _ = tls.close();
-        Ok(body)
+        crate::web::parse(body).ok_or(TlsError::DecodeError)
     })();
     match result {
-        Ok(body) => {
-            n.body = body;
+        Ok(response) => {
+            if response.media == crate::web::Media::Text {
+                for &byte in &response.bytes {
+                    n.body.push(if byte < 128 { byte } else { b'?' });
+                    if n.body.len == n.body.bytes.len() {
+                        break;
+                    }
+                }
+            }
+            n.response = Some(response);
             n.tls_result(true, "Secure connection - TLS 1.3");
             unsafe { hardware::log(b"KreativeOS: HTTPS page loaded\r\n") }
         }
@@ -307,25 +325,64 @@ pub fn fetch(n: &mut Network) {
         }
     }
 }
-fn complete(s: &str) -> bool {
-    let Some((h, b)) = s.split_once("\r\n\r\n") else {
-        return false;
-    };
-    for line in h.split("\r\n") {
-        if let Some((key, value)) = line.split_once(':') {
-            if key.eq_ignore_ascii_case("content-length") {
-                return value
-                    .trim()
-                    .parse::<usize>()
-                    .map(|n| b.len() >= n)
-                    .unwrap_or(false);
-            }
-        }
-    }
-    false
-}
 #[cfg(feature = "tls-smoke")]
 pub fn smoke(n: &mut Network) {
+    let mut document = Text::new();
+    if !smoke_certificates(n, &mut document) {
+        return;
+    }
+    let base = "https://10.0.2.2:8443/";
+    let (image_url, audio_url) = crate::web::media_urls(base, document.str());
+    let (Some(image_url), Some(audio_url)) = (image_url, audio_url) else {
+        unsafe { hardware::log(b"KreativeOS: TLS CHECK FAILED - HTML media links\r\n") };
+        return;
+    };
+    let image = smoke_get(n, image_url.str());
+    if image
+        .as_ref()
+        .and_then(|r| crate::pictures::decode(&r.bytes))
+        .is_none()
+    {
+        unsafe { hardware::log(b"KreativeOS: TLS CHECK FAILED - image\r\n") };
+        return;
+    }
+    let clip = smoke_get(n, audio_url.str());
+    if !clip
+        .as_ref()
+        .is_some_and(|r| crate::audio::play(&r.bytes).is_ok())
+    {
+        unsafe { hardware::log(b"KreativeOS: TLS CHECK FAILED - audio\r\n") };
+        return;
+    }
+    unsafe { hardware::log(b"KreativeOS: HTTPS media PASS\r\n") };
+    if let Err(error) = n.wifi.join("KreativeOSTest", "test-credentials") {
+        diagnostic("Wi-Fi fixture association", &error);
+        unsafe { hardware::log(b"KreativeOS: TLS CHECK FAILED - Wi-Fi\r\n") };
+        return;
+    }
+    if smoke_get(n, base).is_none() {
+        diagnostic("Wi-Fi fixture TCP", &n.status);
+        unsafe { hardware::log(b"KreativeOS: TLS CHECK FAILED - Wi-Fi\r\n") };
+        return;
+    }
+    unsafe { hardware::log(b"KreativeOS: ESP-AT HTTPS PASS\r\n") };
+}
+
+#[cfg(feature = "tls-smoke")]
+fn smoke_get(n: &mut Network, url: &str) -> Option<crate::web::Response> {
+    n.browse(url);
+    let start = hardware::millis();
+    while n.state != 0 && !n.tls_pending && hardware::millis() - start < 20000 {
+        n.poll();
+    }
+    if n.tls_pending {
+        fetch(n);
+    }
+    n.response.take()
+}
+
+#[cfg(feature = "tls-smoke")]
+fn smoke_certificates(n: &mut Network, document: &mut Text<12288>) -> bool {
     for (url, expected) in [
         ("https://10.0.2.2:8443/", true),
         ("https://10.0.2.2:8444/", false),
@@ -342,7 +399,10 @@ pub fn smoke(n: &mut Network) {
         let good = n.verified && n.body.str().contains("KreativeOS HTTPS verified");
         if good != expected || (expected && !n.verified) || (!expected && !n.cert_rejected) {
             unsafe { hardware::log(b"KreativeOS: TLS CHECK FAILED\r\n") };
-            return;
+            return false;
+        }
+        if expected {
+            *document = n.body;
         }
         unsafe {
             hardware::log(if expected {
@@ -352,4 +412,5 @@ pub fn smoke(n: &mut Network) {
             })
         };
     }
+    true
 }

@@ -149,6 +149,10 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
         return None;
     }
     crate::net::DMA = dma as usize;
+    let mut audio_dma = 0xffff_ffffu64;
+    if (bs.allocate_pages)(1, 2, crate::audio::DMA_SIZE / 4096, &mut audio_dma) == 0 {
+        crate::audio::DMA = audio_dma as usize;
+    }
     connect_usb_storage(bs, free);
     load_pictures(bs, free);
     let screen = Screen {
@@ -158,6 +162,7 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
         h: i.height as usize,
         stride: i.stride as usize,
         rgb: i.format == 0,
+        clip: None,
     };
     for _ in 0..4 {
         let mut size = MAP.len();

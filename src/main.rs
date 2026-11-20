@@ -2,6 +2,7 @@
 #![no_main]
 #![allow(static_mut_refs)]
 extern crate alloc;
+mod audio;
 mod boot;
 mod desktop;
 mod e1000;
@@ -13,6 +14,8 @@ mod pictures;
 mod secure;
 mod storage;
 mod text;
+mod web;
+mod wifi;
 
 #[no_mangle]
 pub unsafe extern "efiapi" fn efi_main(image: usize, system: *mut boot::SystemTable) -> usize {
@@ -24,6 +27,7 @@ pub unsafe extern "efiapi" fn efi_main(image: usize, system: *mut boot::SystemTa
         graphics::init();
         hardware::init();
         storage::init();
+        audio::init();
         let network = net::Network::new();
         #[cfg(feature = "tls-smoke")]
         let network = {

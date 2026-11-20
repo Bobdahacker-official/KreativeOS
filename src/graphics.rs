@@ -1,4 +1,12 @@
 use alloc::vec::Vec;
+use tiny_skia::{
+    FillRule, FilterQuality, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke,
+    Transform,
+};
+static mut SYMBOLS: [[u8; 400]; 14] = [[0; 400]; 14];
+static mut POINTER: Option<Pixmap> = None;
+static mut IMAGE_CACHE: Vec<(usize, i32, i32, Pixmap)> = Vec::new();
+
 static mut FONT: Vec<u8> = Vec::new();
 static mut INK_BOUNDS: [(i32, i32, i32, i32); 380] = [(0, 0, 0, 0); 380];
 static mut WALLPAPER: Vec<u32> = Vec::new();
@@ -22,8 +30,79 @@ pub fn init() {
                 INK_BOUNDS[glyph] = (left, top, right, bottom);
             }
         }
+        for id in 0..SYMBOLS.len() {
+            let mut pixmap = Pixmap::new(20, 20).expect("icon pixmap");
+            let mut builder = PathBuilder::new();
+            for path in symbol_paths(id) {
+                let Some((&first, rest)) = path.split_first() else {
+                    continue;
+                };
+                builder.move_to(first.0 as f32 + 0.5, first.1 as f32 + 0.5);
+                for &(x, y) in rest {
+                    builder.line_to(x as f32 + 0.5, y as f32 + 0.5);
+                }
+            }
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(255, 255, 255, 255);
+            let stroke = Stroke {
+                width: 1.65,
+                line_cap: LineCap::Round,
+                line_join: LineJoin::Round,
+                ..Stroke::default()
+            };
+            if let Some(path) = builder.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+            for (to, from) in SYMBOLS[id].iter_mut().zip(pixmap.pixels()) {
+                *to = from.alpha();
+            }
+        }
+        let mut pointer = Pixmap::new(24, 29).expect("cursor pixmap");
+        let mut shape = PathBuilder::new();
+        shape.move_to(1.5, 1.5);
+        shape.line_to(2.0, 22.0);
+        shape.line_to(7.3, 16.7);
+        shape.line_to(11.7, 25.0);
+        shape.line_to(15.5, 23.1);
+        shape.line_to(11.5, 15.0);
+        shape.line_to(19.0, 14.8);
+        shape.close();
+        if let Some(path) = shape.finish() {
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(5, 15, 18, 108);
+            pointer.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::from_translate(1.1, 1.2),
+                None,
+            );
+            paint.set_color_rgba8(250, 253, 249, 255);
+            pointer.fill_path(
+                &path,
+                &paint,
+                FillRule::Winding,
+                Transform::identity(),
+                None,
+            );
+            paint.set_color_rgba8(18, 36, 40, 255);
+            pointer.stroke_path(
+                &path,
+                &paint,
+                &Stroke {
+                    width: 1.35,
+                    line_join: LineJoin::Round,
+                    ..Stroke::default()
+                },
+                Transform::identity(),
+                None,
+            );
+        }
+        POINTER = Some(pointer);
     }
 }
+#[derive(Clone, Copy)]
+pub struct Clip(i32, i32, i32, i32);
 pub struct Screen {
     pub front: *mut u32,
     pub back: *mut u32,
@@ -31,6 +110,7 @@ pub struct Screen {
     pub h: usize,
     pub stride: usize,
     pub rgb: bool,
+    pub clip: Option<Clip>,
 }
 pub fn mix(a: u32, b: u32, t: u32) -> u32 {
     let u = 255 - t;
@@ -54,8 +134,20 @@ pub fn text_width(s: &str, scale: i32) -> i32 {
     s.bytes().map(|b| advance(b, scale)).sum()
 }
 impl Screen {
+    pub fn clip_rect(&mut self, x: i32, y: i32, w: i32, h: i32) -> Option<Clip> {
+        let old = self.clip;
+        let Clip(l, t, r, b) = old.unwrap_or(Clip(0, 0, self.w as i32, self.h as i32));
+        self.clip = Some(Clip(l.max(x), t.max(y), r.min(x + w), b.min(y + h)));
+        old
+    }
+    fn inside(&self, x: i32, y: i32) -> bool {
+        let Clip(l, t, r, b) = self
+            .clip
+            .unwrap_or(Clip(0, 0, self.w as i32, self.h as i32));
+        x >= l && x < r && y >= t && y < b
+    }
     pub fn pixel(&mut self, x: i32, y: i32, c: u32) {
-        if x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h {
+        if self.inside(x, y) {
             unsafe { *self.back.add(y as usize * self.w + x as usize) = c }
         }
     }
@@ -63,7 +155,7 @@ impl Screen {
         if a == 0 {
             return;
         }
-        if x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h {
+        if self.inside(x, y) {
             unsafe {
                 let p = self.back.add(y as usize * self.w + x as usize);
                 *p = mix(*p, c, a.min(255));
@@ -71,9 +163,21 @@ impl Screen {
         }
     }
     pub fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, c: u32) {
-        for yy in y.max(0)..(y + h).min(self.h as i32) {
-            for xx in x.max(0)..(x + w).min(self.w as i32) {
-                self.pixel(xx, yy, c)
+        let Clip(l, t, r, b) = self
+            .clip
+            .unwrap_or(Clip(0, 0, self.w as i32, self.h as i32));
+        let left = x.max(l);
+        let right = (x + w).min(r);
+        if right <= left {
+            return;
+        }
+        for yy in y.max(t)..(y + h).min(b) {
+            unsafe {
+                core::slice::from_raw_parts_mut(
+                    self.back.add(yy as usize * self.w + left as usize),
+                    (right - left) as usize,
+                )
+                .fill(c);
             }
         }
     }
@@ -100,7 +204,27 @@ impl Screen {
         }
     }
     pub fn rounded(&mut self, x: i32, y: i32, w: i32, h: i32, r: i32, c: u32, alpha: u32) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
         let r = r.min(w / 2).min(h / 2).max(1);
+        if alpha == 255 && w > 2 * r && h > 2 * r {
+            self.rect(x + r, y, w - 2 * r, h, c);
+            self.rect(x, y + r, r, h - 2 * r, c);
+            self.rect(x + w - r, y + r, r, h - 2 * r, c);
+            for yy in 0..r {
+                for xx in 0..r {
+                    let dx = r - xx;
+                    let dy = r - yy;
+                    let a = ((r * r - dx * dx - dy * dy) * 255 / (2 * r)).clamp(0, 255) as u32;
+                    self.blend(x + xx, y + yy, c, a);
+                    self.blend(x + w - 1 - xx, y + yy, c, a);
+                    self.blend(x + xx, y + h - 1 - yy, c, a);
+                    self.blend(x + w - 1 - xx, y + h - 1 - yy, c, a);
+                }
+            }
+            return;
+        }
         for yy in 0..h {
             for xx in 0..w {
                 let dx = if xx < r {
@@ -133,9 +257,20 @@ impl Screen {
         self.rounded(x, y, w, h, 10, c, 255)
     }
     pub fn shadow(&mut self, x: i32, y: i32, w: i32, h: i32) {
-        for spread in (1..=6).rev() {
-            let d = spread * 3;
-            self.rounded(x - d, y - d + 9, w + d * 2, h + d * 2, 18 + d, 0x211b3a, 5)
+        for spread in 1..=10 {
+            let alpha = (12 - spread) as u32;
+            let left = x - spread;
+            let right = x + w + spread;
+            let top = y + 3 - spread;
+            let bottom = y + h + 5 + spread;
+            for px in left..right {
+                self.blend(px, top, 0x071517, alpha);
+                self.blend(px, bottom, 0x071517, alpha);
+            }
+            for py in top + 1..bottom {
+                self.blend(left, py, 0x071517, alpha);
+                self.blend(right - 1, py, 0x071517, alpha);
+            }
         }
     }
     pub fn text(&mut self, x: i32, y: i32, s: &str, c: u32, scale: i32) {
@@ -263,106 +398,8 @@ impl Screen {
 
     /// Each mark uses the same 20x20 grid and two-pixel stroke.
     pub fn symbol(&mut self, x: i32, y: i32, id: usize, c: u32) {
-        let paths: &[&[(i32, i32)]] = match id {
-            0 => &[&[(2, 15), (2, 5), (8, 5), (10, 7), (17, 7), (17, 15), (2, 15)]],
-            1 => &[
-                &[(4, 2), (15, 2), (15, 17), (4, 17), (4, 2)],
-                &[(7, 6), (12, 6)],
-                &[(7, 10), (12, 10)],
-                &[(7, 14), (10, 14)],
-            ],
-            2 => &[&[(3, 5), (7, 9), (3, 13)], &[(10, 14), (16, 14)]],
-            3 => &[
-                &[
-                    (5, 3),
-                    (14, 3),
-                    (17, 6),
-                    (17, 13),
-                    (14, 16),
-                    (5, 16),
-                    (2, 13),
-                    (2, 6),
-                    (5, 3),
-                ],
-                &[(3, 9), (16, 9)],
-                &[(10, 3), (7, 9), (10, 16), (13, 9), (10, 3)],
-            ],
-            4 => &[
-                &[(3, 2), (16, 2), (16, 17), (3, 17), (3, 2)],
-                &[(6, 6), (13, 6)],
-                &[(6, 10), (7, 10)],
-                &[(11, 10), (12, 10)],
-                &[(6, 14), (7, 14)],
-                &[(11, 14), (12, 14)],
-            ],
-            5 => &[
-                &[(4, 13), (13, 3), (16, 6), (7, 16), (3, 17), (4, 13)],
-                &[(4, 13), (7, 16)],
-                &[(11, 5), (14, 8)],
-            ],
-            6 => &[
-                &[(3, 14), (3, 7), (8, 7), (8, 13), (13, 13), (13, 5), (17, 5)],
-                &[(15, 3), (17, 5), (15, 7)],
-            ],
-            7 => &[
-                &[
-                    (3, 6),
-                    (10, 3),
-                    (16, 6),
-                    (16, 14),
-                    (10, 17),
-                    (3, 14),
-                    (3, 6),
-                ],
-                &[(3, 6), (10, 9), (16, 6)],
-                &[(10, 9), (10, 17)],
-            ],
-            8 => &[
-                &[(3, 16), (3, 12)],
-                &[(9, 16), (9, 8)],
-                &[(15, 16), (15, 3)],
-            ],
-            9 => &[
-                &[(3, 5), (16, 5)],
-                &[(3, 10), (16, 10)],
-                &[(3, 15), (16, 15)],
-                &[(7, 3), (7, 7)],
-                &[(12, 8), (12, 12)],
-                &[(6, 13), (6, 17)],
-            ],
-            10 => &[
-                &[(7, 3), (7, 16)],
-                &[(12, 3), (12, 16)],
-                &[(3, 7), (16, 7)],
-                &[(3, 12), (16, 12)],
-            ],
-            11 => &[
-                &[
-                    (2, 4),
-                    (8, 4),
-                    (10, 6),
-                    (12, 4),
-                    (17, 4),
-                    (17, 15),
-                    (12, 15),
-                    (10, 17),
-                    (8, 15),
-                    (2, 15),
-                    (2, 4),
-                ],
-                &[(10, 6), (10, 16)],
-            ],
-            12 => &[
-                &[(2, 3), (17, 3), (17, 16), (2, 16), (2, 3)],
-                &[(3, 13), (7, 9), (11, 13), (14, 10), (16, 12)],
-                &[(12, 7), (13, 7)],
-            ],
-            _ => &[&[(4, 3), (4, 16)], &[(14, 3), (5, 10), (15, 16)]],
-        };
-        for path in paths {
-            for points in path.windows(2) {
-                self.stroke(x, y, points[0], points[1], c);
-            }
+        for (i, a) in unsafe { SYMBOLS[id.min(13)] }.iter().enumerate() {
+            self.blend(x + (i % 20) as i32, y + (i / 20) as i32, c, *a as u32);
         }
     }
 
@@ -375,6 +412,9 @@ impl Screen {
         picture: &crate::pictures::Picture,
         zoom: bool,
     ) {
+        if w <= 0 || h <= 0 {
+            return;
+        }
         let (pw, ph) = (picture.width as i32, picture.height as i32);
         let (width, height) = if zoom {
             (pw, ph)
@@ -384,37 +424,110 @@ impl Screen {
             ((h * pw / ph).max(1), h)
         };
         let (left, top) = (x + (w - width) / 2, y + (h - height) / 2);
-        for yy in y.max(top)..(y + h).min(top + height) {
-            let row = (yy - top) * ph / height;
-            for xx in x.max(left)..(x + w).min(left + width) {
-                let col = (xx - left) * pw / width;
-                self.pixel(xx, yy, picture.pixels[(row * pw + col) as usize]);
+        let old = self.clip_rect(x, y, w, h);
+        if (width, height) == (pw, ph) {
+            self.blit_pixmap(left, top, &picture.pixmap);
+        } else {
+            let cache = unsafe { &mut IMAGE_CACHE };
+            let id = picture.id;
+            let entry = if let Some(idx) = cache
+                .iter()
+                .position(|item| (item.0, item.1, item.2) == (id, width, height))
+            {
+                idx
+            } else {
+                if cache.len() == 3 {
+                    cache.remove(0);
+                }
+                if let Some(mut scaled) = Pixmap::new(width as u32, height as u32) {
+                    let paint = PixmapPaint {
+                        quality: FilterQuality::Bicubic,
+                        ..PixmapPaint::default()
+                    };
+                    scaled.draw_pixmap(
+                        0,
+                        0,
+                        picture.pixmap.as_ref(),
+                        &paint,
+                        Transform::from_scale(width as f32 / pw as f32, height as f32 / ph as f32),
+                        None,
+                    );
+                    cache.push((id, width, height, scaled));
+                }
+                cache.len().saturating_sub(1)
+            };
+            if let Some((_, _, _, scaled)) = cache
+                .get(entry)
+                .filter(|v| (v.0, v.1, v.2) == (id, width, height))
+            {
+                self.blit_pixmap(left, top, scaled);
+            }
+        }
+        self.clip = old;
+    }
+
+    fn blit_pixmap(&mut self, x: i32, y: i32, pixmap: &Pixmap) {
+        let width = pixmap.width() as usize;
+        for (i, pixel) in pixmap.pixels().iter().enumerate() {
+            let alpha = pixel.alpha() as u32;
+            if alpha == 0 {
+                continue;
+            }
+            let (xx, yy) = (x + (i % width) as i32, y + (i / width) as i32);
+            let channel = |v: u8| v as u32 * 255 / alpha;
+            let color = (channel(pixel.red()) << 16)
+                | (channel(pixel.green()) << 8)
+                | channel(pixel.blue());
+            if alpha == 255 {
+                self.pixel(xx, yy, color);
+            } else {
+                self.blend(xx, yy, color, alpha);
             }
         }
     }
-
-    pub fn cursor(&mut self, x: i32, y: i32) {
-        for yy in 0..24 {
-            for xx in 0..17 {
-                let edge = yy as f32 * 0.62 - xx as f32;
-                let a = (edge * 255.).clamp(0., 255.) as u32;
-                if xx <= yy * 2 / 3 && yy < 20 {
-                    self.blend(x + xx + 1, y + yy + 2, 0x000000, a / 3);
-                    self.blend(
-                        x + xx,
-                        y + yy,
-                        if xx == 0 || edge < 1.4 || yy == 19 {
-                            0xffffff
-                        } else {
-                            0x2c3041
-                        },
-                        a,
-                    )
+    fn front_pixel(&self, x: i32, y: i32, c: u32) {
+        let c = if self.rgb {
+            (c & 0xff00) | ((c & 255) << 16) | ((c >> 16) & 255)
+        } else {
+            c
+        };
+        unsafe {
+            core::ptr::write_volatile(self.front.add(y as usize * self.stride + x as usize), c);
+        }
+    }
+    /// Restore the previous pointer from the unmodified scene, then composite its new position.
+    pub fn pointer(&self, previous: Option<(i32, i32)>, at: (i32, i32)) {
+        let Some(cursor) = (unsafe { POINTER.as_ref() }) else {
+            return;
+        };
+        let width = cursor.width() as i32;
+        let height = cursor.height() as i32;
+        let valid = |x: i32, y: i32| x >= 0 && y >= 0 && x < self.w as i32 && y < self.h as i32;
+        let scene = |x: i32, y: i32| unsafe { *self.back.add(y as usize * self.w + x as usize) };
+        if let Some((x, y)) = previous {
+            for dy in 0..height {
+                for dx in 0..width {
+                    let (px, py) = (x + dx - 1, y + dy - 1);
+                    if valid(px, py) {
+                        self.front_pixel(px, py, scene(px, py));
+                    }
                 }
             }
         }
-        self.line(x + 6, y + 16, x + 11, y + 26, 0xffffff);
-        self.line(x + 7, y + 16, x + 12, y + 26, 0x2c3041);
+        for (index, p) in cursor.pixels().iter().enumerate() {
+            let (x, y) = (
+                at.0 + index as i32 % width - 1,
+                at.1 + index as i32 / width - 1,
+            );
+            let a = p.alpha() as u32;
+            if !valid(x, y) || a == 0 {
+                continue;
+            }
+            let src = ((p.red() as u32 * 255 / a) << 16)
+                | ((p.green() as u32 * 255 / a) << 8)
+                | (p.blue() as u32 * 255 / a);
+            self.front_pixel(x, y, mix(scene(x, y), src, a));
+        }
     }
     pub fn present(&mut self) {
         unsafe {
@@ -430,5 +543,118 @@ impl Screen {
                 }
             }
         }
+    }
+}
+
+fn symbol_paths(id: usize) -> &'static [&'static [(i32, i32)]] {
+    match id {
+        0 => &[&[(2, 15), (2, 5), (8, 5), (10, 7), (17, 7), (17, 15), (2, 15)]],
+        1 => &[
+            &[(4, 2), (15, 2), (15, 17), (4, 17), (4, 2)],
+            &[(7, 6), (12, 6)],
+            &[(7, 10), (12, 10)],
+            &[(7, 14), (10, 14)],
+        ],
+        2 => &[&[(3, 5), (7, 9), (3, 13)], &[(10, 14), (16, 14)]],
+        3 => &[
+            &[
+                (10, 2),
+                (14, 3),
+                (17, 6),
+                (18, 10),
+                (17, 14),
+                (14, 17),
+                (10, 18),
+                (6, 17),
+                (3, 14),
+                (2, 10),
+                (3, 6),
+                (6, 3),
+                (10, 2),
+            ],
+            &[
+                (10, 2),
+                (7, 6),
+                (6, 10),
+                (7, 14),
+                (10, 18),
+                (13, 14),
+                (14, 10),
+                (13, 6),
+                (10, 2),
+            ],
+            &[(3, 10), (17, 10)],
+        ],
+        4 => &[
+            &[(3, 2), (16, 2), (16, 17), (3, 17), (3, 2)],
+            &[(6, 6), (13, 6)],
+            &[(6, 10), (7, 10)],
+            &[(11, 10), (12, 10)],
+            &[(6, 14), (7, 14)],
+            &[(11, 14), (12, 14)],
+        ],
+        5 => &[
+            &[(4, 13), (13, 3), (16, 6), (7, 16), (3, 17), (4, 13)],
+            &[(4, 13), (7, 16)],
+            &[(11, 5), (14, 8)],
+        ],
+        6 => &[
+            &[(3, 15), (3, 10), (6, 8), (13, 8), (15, 6), (13, 3), (9, 3)],
+            &[(8, 4), (6, 3), (8, 2)],
+        ],
+        7 => &[
+            &[
+                (3, 6),
+                (10, 3),
+                (16, 6),
+                (16, 14),
+                (10, 17),
+                (3, 14),
+                (3, 6),
+            ],
+            &[(3, 6), (10, 9), (16, 6)],
+            &[(10, 9), (10, 17)],
+        ],
+        8 => &[
+            &[(3, 16), (3, 12)],
+            &[(9, 16), (9, 8)],
+            &[(15, 16), (15, 3)],
+        ],
+        9 => &[
+            &[(3, 5), (16, 5)],
+            &[(3, 10), (16, 10)],
+            &[(3, 15), (16, 15)],
+            &[(7, 3), (7, 7)],
+            &[(12, 8), (12, 12)],
+            &[(6, 13), (6, 17)],
+        ],
+        10 => &[
+            &[(7, 3), (7, 16)],
+            &[(12, 3), (12, 16)],
+            &[(3, 7), (16, 7)],
+            &[(3, 12), (16, 12)],
+        ],
+        11 => &[
+            &[
+                (2, 4),
+                (8, 4),
+                (10, 6),
+                (12, 4),
+                (17, 4),
+                (17, 15),
+                (12, 15),
+                (10, 17),
+                (8, 15),
+                (2, 15),
+                (2, 4),
+            ],
+            &[(10, 6), (10, 16)],
+        ],
+        12 => &[
+            &[(2, 3), (17, 3), (17, 16), (2, 16), (2, 3)],
+            &[(3, 13), (7, 9), (11, 13), (14, 10), (16, 12)],
+            &[(12, 7), (13, 7)],
+        ],
+        _ => &[&[(4, 3), (4, 16)], &[(14, 3), (5, 10), (15, 16)]],
     }
 }

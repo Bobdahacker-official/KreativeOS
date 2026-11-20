@@ -4,6 +4,14 @@ cd "$(dirname "$0")/.."
 OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS="${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 if [ ! -f build/OVMF_VARS.fd ]; then cp "$OVMF_VARS" build/OVMF_VARS.fd; fi
+audio=(-device AC97)
+if [ -n "${AUDIO_SPEC:-}" ]; then
+  audio=(-audiodev "$AUDIO_SPEC,id=kos_audio" -device AC97,audiodev=kos_audio)
+fi
+serial2=()
+if [ -n "${ESP_AT_SERIAL:-}" ]; then
+  serial2=(-serial "$ESP_AT_SERIAL")
+fi
 exec qemu-system-x86_64 -machine pc -cpu max -m 256 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
@@ -11,4 +19,4 @@ exec qemu-system-x86_64 -machine pc -cpu max -m 256 \
   -device virtio-blk-pci,drive=kos,bootindex=1 \
   -drive if=ide,index=0,format=raw,file=build/KreativeOS-data.img \
   -device "${NIC_MODEL:-rtl8139},netdev=net0" -netdev user,id=net0 \
-  -vga std -serial "file:${SERIAL_LOG:-build/serial.log}" "$@"
+  -vga std -serial "file:${SERIAL_LOG:-build/serial.log}" "${serial2[@]}" "${audio[@]}" "$@"

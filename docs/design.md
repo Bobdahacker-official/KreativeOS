@@ -5,3 +5,9 @@ The desktop uses jade and graphite, a full-width taskbar and a two-column launch
 The renderer draws into a RAM framebuffer. Fonts come from Open Sans, rasterized into a compressed grayscale glyph atlas at four sizes. Button labels and window titles use the visible glyph bounds for centering. The font license is in [assets/OpenSans-LICENSE.txt](../assets/OpenSans-LICENSE.txt).
 
 KreativeOS draws its own app marks and wallpaper. Firmware graphics access follows the [UEFI Graphics Output Protocol](https://uefi.org/specs/UEFI/2.10/12_Protocols_Console_Support.html).
+
+## Renderer dependency
+
+[tiny-skia](https://github.com/linebender/tiny-skia) is the shared 2D rasterizer. The build disables its standard-library features and uses its floating-point support for bare metal. It rasterizes the desktop’s vector app marks and cursor and performs cached bicubic scaling for local and HTTPS images. KreativeOS controls windows, input routing, and framebuffer composition.
+
+[smoltcp](https://github.com/smoltcp-rs/smoltcp) was also evaluated for its bare-metal sockets. The current Ethernet stack already supported the two NIC drivers and authenticated HTTPS. The ESP-AT radio exposes TCP through UART, so adding smoltcp would not provide that radio interface.

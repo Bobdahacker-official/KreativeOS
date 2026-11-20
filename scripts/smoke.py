@@ -47,7 +47,21 @@ try:
     png = b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',width,height,8,2,0,0,0))
     png += chunk(b'IDAT',zlib.compress(scan))+chunk(b'IEND',b'')
     (root / 'build/desktop.png').write_bytes(png)
-    print('PASS: UEFI entry, ExitBootServices, desktop and nonempty framebuffer')
+    def move_right(delta):
+        command('input-send-event', {'events': [{'type': 'rel', 'data': {'axis': 'x', 'value': delta}}]})
+        time.sleep(0.2)
+        command('screendump', {'filename': str(ppm)})
+        return ppm.read_bytes().split(b'\n', 3)[3]
+
+    moved = move_right(72)
+    moved_again = move_right(72)
+    def patch(frame, x, y, w=26, h=28):
+        return b''.join(frame[(row*width+x)*3:(row*width+x+w)*3] for row in range(y, y+h))
+    if width >= 700 and height >= 500:
+        assert patch(pixels, 497, 378) != patch(moved, 497, 378), 'Pointer did not move'
+        assert patch(moved, 497, 378) == patch(moved_again, 497, 378), 'Pointer left a trail'
+        assert patch(moved, 569, 378) != patch(moved_again, 569, 378), 'Pointer delta was dropped'
+    print('PASS: UEFI entry, ExitBootServices, desktop, framebuffer and PS/2 pointer movement')
 finally:
     if p.poll() is None:
         p.terminate()

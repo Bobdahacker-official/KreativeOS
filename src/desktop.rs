@@ -30,6 +30,13 @@ const GUIDE: usize = 11;
 const IMAGES: usize = 12;
 const APP_COUNT: usize = NAMES.len();
 const BAR: i32 = 54;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WebJob {
+    Page,
+    Image,
+    Audio,
+}
+
 #[derive(Clone, Copy)]
 struct Window {
     open: bool,
@@ -134,6 +141,17 @@ struct Desktop {
     command: Text<128>,
     url: Text<384>,
     page: Text<12288>,
+    web_job: WebJob,
+    resource: Text<384>,
+    redirects: u8,
+    web_picture: Option<crate::pictures::Picture>,
+    audio_url: Option<Text<384>>,
+    audio_clip: alloc::vec::Vec<u8>,
+    web_status: &'static str,
+    wifi_ssid: Text<32>,
+    wifi_pass: Text<63>,
+    wifi_password_field: bool,
+    wifi_status: &'static str,
     scroll: usize,
     calc: Text<128>,
     answer: Text<128>,
@@ -141,6 +159,7 @@ struct Desktop {
     snake: Snake,
     paint_color: u32,
     last_paint: Option<(i32, i32)>,
+    painting: bool,
     installed: bool,
     package: Text<2048>,
     ttt: [u8; 9],
@@ -167,6 +186,17 @@ impl Desktop {
             command: Text::new(),
             url: Text::new(),
             page: Text::new(),
+            web_job: WebJob::Page,
+            resource: Text::new(),
+            redirects: 0,
+            web_picture: None,
+            audio_url: None,
+            audio_clip: alloc::vec::Vec::new(),
+            web_status: "",
+            wifi_ssid: Text::new(),
+            wifi_pass: Text::new(),
+            wifi_password_field: false,
+            wifi_status: "ESP-AT on COM2",
             scroll: 0,
             calc: Text::new(),
             answer: Text::new(),
@@ -174,6 +204,7 @@ impl Desktop {
             snake: Snake::new(),
             paint_color: 0x176f80,
             last_paint: None,
+            painting: false,
             installed: false,
             package: Text::new(),
             ttt: [0; 9],
@@ -238,7 +269,109 @@ impl Desktop {
         self.order[APP_COUNT - 1] = id;
         self.menu = false
     }
+    fn clear_web_media(&mut self) {
+        crate::audio::stop();
+        self.web_picture = None;
+        self.audio_url = None;
+        self.audio_clip.clear();
+        self.web_status = "";
+    }
+    fn navigate(&mut self, n: &mut Network) {
+        self.clear_web_media();
+        self.scroll = 0;
+        if self.url.str().starts_with("file:") {
+            self.load_local();
+            return;
+        }
+        self.page.clear();
+        self.request(self.url, WebJob::Page, n);
+    }
+    fn request(&mut self, url: Text<384>, job: WebJob, n: &mut Network) {
+        self.resource = url;
+        self.web_job = job;
+        self.redirects = 0;
+        n.browse(url.str());
+    }
+    fn play_audio(&mut self, n: &mut Network) {
+        if !self.audio_clip.is_empty() {
+            self.web_status = match crate::audio::play(&self.audio_clip) {
+                Ok(()) => "Playing WAV audio",
+                Err(error) => error,
+            };
+        } else if let Some(url) = self.audio_url {
+            if n.state == 0 {
+                self.request(url, WebJob::Audio, n);
+                self.web_status = "Loading audio";
+            }
+        }
+    }
+    fn receive_web(&mut self, n: &mut Network) {
+        use crate::web::Media;
+        let Some(response) = n.response.take() else {
+            if n.state == 0 && !self.url.str().starts_with("file:") {
+                if self.web_job == WebJob::Page {
+                    net::readable(n.body.str(), &mut self.page);
+                } else if !n.verified {
+                    self.web_status = n.status;
+                }
+            }
+            return;
+        };
+        if response.location.len > 0 {
+            if self.redirects < 4 {
+                if let Some(url) = crate::web::resolve(self.resource.str(), response.location.str())
+                {
+                    self.redirects += 1;
+                    self.resource = url;
+                    n.browse(url.str());
+                    return;
+                }
+            }
+            self.web_status = "HTTPS redirect could not be followed";
+            return;
+        }
+        if response.media == Media::Image && self.web_job != WebJob::Audio {
+            self.web_picture = crate::pictures::decode(&response.bytes);
+            self.web_status = if self.web_picture.is_some() {
+                "Image loaded over HTTPS"
+            } else {
+                "Image format or size unsupported"
+            };
+            return;
+        }
+        if response.media == Media::Audio && self.web_job != WebJob::Image {
+            if crate::audio::wave(&response.bytes).is_none() {
+                self.web_status = "Expected 16-bit PCM WAV";
+                return;
+            }
+            self.audio_clip = response.bytes;
+            self.web_status = "WAV audio ready";
+            if self.web_job == WebJob::Audio {
+                self.play_audio(n);
+            }
+            return;
+        }
+        if self.web_job == WebJob::Page {
+            net::readable(n.body.str(), &mut self.page);
+            let (image, audio) = crate::web::media_urls(self.resource.str(), n.body.str());
+            self.audio_url = audio;
+            if let Some(url) = image {
+                self.request(url, WebJob::Image, n);
+            }
+        } else {
+            self.web_status = "The server returned an unexpected media type";
+        }
+    }
+    fn join_wifi(&mut self, n: &mut Network) {
+        self.wifi_status = match n.wifi.join(self.wifi_ssid.str(), self.wifi_pass.str()) {
+            Ok(()) => "Connected. HTTPS uses Wi-Fi.",
+            Err(error) => error,
+        };
+        self.wifi_pass.bytes.fill(0);
+        self.wifi_pass.clear();
+    }
     fn load_local(&mut self) {
+        self.clear_web_media();
         self.page.clear();
         let name = self
             .url
@@ -326,14 +459,7 @@ impl Desktop {
             3 => match key {
                 0x84 => self.url.clear(),
                 8 => self.url.pop(),
-                b'\n' => {
-                    if self.url.str().starts_with("file:") {
-                        self.load_local()
-                    } else {
-                        n.browse(self.url.str());
-                        self.scroll = 0
-                    }
-                }
+                b'\n' => self.navigate(n),
                 0x80 => self.scroll = self.scroll.saturating_sub(80),
                 0x81 => self.scroll = (self.scroll + 80).min(self.page.len),
                 32..=126 => self.url.push(key),
@@ -361,6 +487,27 @@ impl Desktop {
                     self.snake.next = v
                 }
             }
+            8 => match key {
+                0x80 => self.wifi_password_field = false,
+                0x81 => self.wifi_password_field = true,
+                b'\n' if !self.wifi_password_field => self.wifi_password_field = true,
+                b'\n' => self.join_wifi(n),
+                8 => {
+                    if self.wifi_password_field {
+                        self.wifi_pass.pop();
+                    } else {
+                        self.wifi_ssid.pop();
+                    }
+                }
+                32..=126 => {
+                    if self.wifi_password_field {
+                        self.wifi_pass.push(key);
+                    } else {
+                        self.wifi_ssid.push(key);
+                    }
+                }
+                _ => {}
+            },
             IMAGES => match key {
                 0x80 | 0x82 => self.step_image(-1),
                 0x81 | 0x83 => self.step_image(1),
@@ -415,12 +562,30 @@ impl Desktop {
  "edit"=>{self.filename.set(arg);self.note.clear();if let Some(i)=storage::find(arg){unsafe{self.note=storage::FILES[i].data}}self.open(1)},
  "save"=>{self.save();self.terminal.append(self.notice.str())},"clear"=>self.terminal.clear(),
  "open"=>{if let Some(i)=NAMES.iter().position(|s|s.eq_ignore_ascii_case(arg)){self.open(i)}else{self.terminal.append("Unknown app")}},
- "browse"=>{self.url.set(arg);if arg.starts_with("file:"){self.load_local()}else{n.browse(arg)}self.open(3)},
+ "browse"=>{self.url.set(arg);self.navigate(n);self.open(3)},
  "net"=>{let _=write!(self.terminal,"{}\nIP 10.0.2.15/24  Gateway 10.0.2.2\nDNS 10.0.2.3\nRX {} TX {}\n",n.status,n.received,n.sent);},
  "uptime"=>{let _=write!(self.terminal,"{} seconds",hardware::millis()/1000);},
  "calc"=>{self.calc.set(arg);self.calculate();self.terminal.append(self.answer.str())},
  "install"=>{if arg=="Guide.kapp"{self.package_install();self.terminal.append(self.notice.str())}else{self.terminal.append("Package not found: use Guide.kapp")}},
  "reboot"=>hardware::reboot(),""=>(),_=>self.terminal.append("Unknown command. Type help.")}
+    }
+    fn pointer_hover(&self, w: i32, h: i32) -> Option<(usize, i32)> {
+        if self.menu {
+            return Some((APP_COUNT, self.my / 48));
+        }
+        if self.my >= h - BAR {
+            return Some((APP_COUNT + 1, (self.mx - 124) / task_width(w)));
+        }
+        for &id in self.order.iter().rev() {
+            let win = self.windows[id];
+            if win.open && !win.min && win.inside(self.mx, self.my) {
+                if self.my < win.y + 38 && self.mx >= win.x + win.w - 114 {
+                    return Some((id, (self.mx - (win.x + win.w - 114)) / 38));
+                }
+                break;
+            }
+        }
+        None
     }
     fn mouse(&mut self, dx: i32, dy: i32, buttons: u8, wheel: i32, s: &Screen, n: &mut Network) {
         self.mx = (self.mx + dx).clamp(0, s.w as i32 - 1);
@@ -445,11 +610,13 @@ impl Desktop {
         self.buttons = buttons;
         if buttons & 1 == 0 {
             self.drag = None;
-            self.last_paint = None
+            self.last_paint = None;
+            self.painting = false;
         }
         if let Some((id, ox, oy)) = self.drag {
-            self.windows[id].x = (self.mx - ox).clamp(0, s.w as i32 - 100);
-            self.windows[id].y = (self.my - oy).clamp(0, s.h as i32 - 90);
+            let window = &mut self.windows[id];
+            window.x = (self.mx - ox).clamp(0, (s.w as i32 - window.w).max(0));
+            window.y = (self.my - oy).clamp(0, (s.h as i32 - BAR - window.h).max(0));
             return;
         }
         if click {
@@ -499,7 +666,10 @@ impl Desktop {
                 let ly = y - w.y;
                 if ly < 38 {
                     if lx >= w.w - 38 {
-                        self.windows[id].open = false
+                        self.windows[id].open = false;
+                        if id == 3 {
+                            crate::audio::stop();
+                        }
                     } else if (w.w - 114..w.w - 76).contains(&lx) {
                         self.windows[id].min = true
                     } else if (w.w - 76..w.w - 38).contains(&lx) {
@@ -521,11 +691,12 @@ impl Desktop {
                     }
                     return;
                 }
+                self.painting = id == 5 && lx >= 20 && lx < 660 && ly >= 100 && ly < 460;
                 self.app_click(id, lx, ly, n);
                 break;
             }
         }
-        if buttons & 1 != 0 && self.focus == 5 {
+        if buttons & 1 != 0 && self.painting && self.focus == 5 {
             let w = self.windows[5];
             if w.open && !w.min {
                 let x = (self.mx - w.x - 20) / 2;
@@ -537,6 +708,8 @@ impl Desktop {
                         paint_line(x, y, x, y, self.paint_color)
                     }
                     self.last_paint = Some((x, y));
+                } else {
+                    self.last_paint = None;
                 }
             }
         }
@@ -581,15 +754,16 @@ impl Desktop {
                 }
             }
             3 => {
-                if y < 88 && x > self.windows[id].w - 100 {
-                    if self.url.str().starts_with("file:") {
-                        self.load_local()
-                    } else {
-                        n.browse(self.url.str());
-                        self.scroll = 0
-                    }
-                } else if y > self.windows[id].h - 40 {
-                    self.scroll = (self.scroll + 200).min(self.page.len)
+                let w = self.windows[id];
+                if (48..84).contains(&y) && x > w.w - 90 {
+                    self.navigate(n);
+                } else if (48..84).contains(&y) && x >= 14 && x < w.w - 108 {
+                    self.url.clear();
+                } else if y >= w.h - 44
+                    && x >= w.w - 160
+                    && (self.audio_url.is_some() || !self.audio_clip.is_empty())
+                {
+                    self.play_audio(n);
                 }
             }
             4 => {
@@ -630,6 +804,15 @@ impl Desktop {
                     self.package_install()
                 } else if y >= 200 && y < 260 && self.installed {
                     self.open(11)
+                }
+            }
+            8 => {
+                if (177..212).contains(&y) {
+                    self.wifi_password_field = false;
+                } else if (247..282).contains(&y) {
+                    self.wifi_password_field = true;
+                } else if (295..336).contains(&y) {
+                    self.join_wifi(n);
                 }
             }
             9 => {
@@ -765,7 +948,13 @@ impl Desktop {
             bar_y + 30,
             80,
             16,
-            if n.online() { "Ethernet" } else { "Offline" },
+            if n.wifi.joined {
+                "Wi-Fi"
+            } else if n.online() {
+                "Ethernet"
+            } else {
+                "Offline"
+            },
             0x9ab9ad,
             1,
         );
@@ -796,7 +985,6 @@ impl Desktop {
                 s.centered(left + 43, row + 3, 139, 42, label, INK, 1);
             }
         }
-        s.cursor(self.mx, self.my);
     }
     fn window(&self, s: &mut Screen, n: &Network, id: usize, a: Window) {
         let x = a.x;
@@ -853,6 +1041,7 @@ impl Desktop {
                 }
             }
         }
+        let clip = s.clip_rect(x + 1, y + 38, w - 2, h - 39);
         match id {
             0 => {
                 s.rect(x + 1, y + 39, 142, h - 54, 0xe7ede2);
@@ -930,42 +1119,62 @@ impl Desktop {
                 s.text(x + 46, y + h - 32, self.command.str(), INK, 2);
             }
             3 => {
-                s.rounded(x + 14, y + 48, w - 110, 32, 9, 0xffffff, 255);
-                let u = self.url.str();
+                s.rounded(x + 14, y + 48, w - 110, 34, 7, 0xffffff, 255);
+                let url = self.url.str();
                 s.text(
-                    x + 21,
-                    y + 58,
-                    if u.len() > ((w - 130) / 6) as usize {
-                        &u[u.len() - ((w - 130) / 6) as usize..]
+                    x + 23,
+                    y + 56,
+                    if url.is_empty() {
+                        "Enter an HTTPS address"
                     } else {
-                        u
+                        clip_label(url, w - 136, 1)
                     },
                     INK,
                     1,
                 );
-                button(s, x + w - 86, y + 48, 72, "GO", self.accent);
+                button(s, x + w - 86, y + 48, 72, "Go", self.accent);
                 s.rect(x + 14, y + 95, w - 28, h - 143, 0xffffff);
-                let start = self.scroll.min(self.page.len);
-                s.wrapped(
-                    x + 26,
-                    y + 108,
-                    w - 52,
-                    h - 165,
-                    &self.page.str()[start..],
-                    0x21394c,
-                );
+                let image_height = if self.web_picture.is_some() {
+                    if self.page.len == 0 {
+                        h - 158
+                    } else {
+                        (h / 2).max(72)
+                    }
+                } else {
+                    0
+                };
+                if let Some(image) = &self.web_picture {
+                    s.image(x + 26, y + 101, w - 52, image_height, image, false);
+                }
+                if self.page.len > 0 {
+                    let start = self.scroll.min(self.page.len);
+                    s.wrapped(
+                        x + 26,
+                        y + 108 + image_height,
+                        w - 52,
+                        (h - 165 - image_height).max(0),
+                        &self.page.str()[start..],
+                        INK,
+                    );
+                }
+                let can_play = self.audio_url.is_some() || !self.audio_clip.is_empty();
+                let status = if self.url.str().starts_with("file:") {
+                    "Local document"
+                } else if !self.web_status.is_empty() {
+                    self.web_status
+                } else {
+                    n.status
+                };
                 s.text(
                     x + 20,
                     y + h - 31,
-                    if self.url.str().starts_with("file:") {
-                        "Local document"
-                    } else {
-                        n.status
-                    },
+                    clip_label(status, w - if can_play { 175 } else { 40 }, 1),
                     MUTED,
                     1,
                 );
-                s.text(x + w - 116, y + h - 31, "Scroll down", self.accent, 1);
+                if can_play {
+                    button(s, x + w - 154, y + h - 43, 138, "Play sound", self.accent);
+                }
             }
             4 => {
                 s.text(x + 24, y + 63, self.calc.str(), INK, 2);
@@ -1058,10 +1267,62 @@ impl Desktop {
                 s.wrapped(x + 24, y + 285, w - 48, 100, self.notice.str(), INK);
             }
             8 => {
-                s.text(x + 24, y + 64, "Connections", self.accent, 2);
-                let mut details: Text<1024> = Text::new();
-                let _=write!(details,"{}\n\nEthernet: {}\nIPv4: 10.0.2.15 / 24\nGateway: 10.0.2.2\nDNS: 10.0.2.3\n\nMAC: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}\nFrames received: {}\nFrames sent: {}\n\nWi-Fi PCI devices: {}\nWi-Fi radio driver: not installed",n.status,n.adapter_name(),n.mac[0],n.mac[1],n.mac[2],n.mac[3],n.mac[4],n.mac[5],n.received,n.sent,n.wifi_devices);
-                s.wrapped(x + 24, y + 106, w - 48, h - 130, details.str(), INK);
+                s.text(x + 24, y + 58, "Network", INK, 3);
+                let mut status: Text<128> = Text::new();
+                let _ = write!(
+                    status,
+                    "Ethernet: {}   |   Wi-Fi: {}",
+                    n.adapter_name(),
+                    if n.wifi.joined {
+                        "connected"
+                    } else {
+                        "disconnected"
+                    }
+                );
+                s.text(x + 24, y + 92, status.str(), MUTED, 1);
+                s.text(x + 24, y + 126, "Join Wi-Fi", self.accent, 2);
+                s.text(x + 24, y + 154, "Network name", INK, 1);
+                s.rounded(
+                    x + 24,
+                    y + 177,
+                    w - 48,
+                    34,
+                    6,
+                    if !self.wifi_password_field {
+                        0xd8ece2
+                    } else {
+                        0xffffff
+                    },
+                    255,
+                );
+                s.text(x + 35, y + 185, self.wifi_ssid.str(), INK, 1);
+                s.text(x + 24, y + 224, "Password", INK, 1);
+                s.rounded(
+                    x + 24,
+                    y + 247,
+                    w - 48,
+                    34,
+                    6,
+                    if self.wifi_password_field {
+                        0xd8ece2
+                    } else {
+                        0xffffff
+                    },
+                    255,
+                );
+                let mut hidden: Text<64> = Text::new();
+                for _ in 0..self.wifi_pass.len {
+                    hidden.push(b'*');
+                }
+                s.text(x + 35, y + 255, hidden.str(), INK, 1);
+                button(s, x + 24, y + 295, 112, "Connect", self.accent);
+                s.text(
+                    x + 150,
+                    y + 303,
+                    clip_label(self.wifi_status, w - 170, 1),
+                    MUTED,
+                    1,
+                );
             }
             9 => {
                 s.text(x + 24, y + 64, "Make it yours", self.accent, 2);
@@ -1099,9 +1360,11 @@ impl Desktop {
                         s.round(xx, yy, 94, 94, SURFACE);
                         let v = self.ttt[(row * 3 + col) as usize];
                         if v != 0 {
-                            s.text(
-                                xx + 31,
-                                yy + 25,
+                            s.centered(
+                                xx,
+                                yy,
+                                94,
+                                94,
                                 if v == 1 { "X" } else { "O" },
                                 if v == 1 { self.accent } else { 0xffb870 },
                                 6,
@@ -1160,6 +1423,7 @@ impl Desktop {
             11 => s.wrapped(x + 24, y + 60, w - 48, h - 85, self.package.str(), INK),
             _ => (),
         }
+        s.clip = clip;
     }
 }
 fn task_width(width: i32) -> i32 {
@@ -1234,15 +1498,30 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
     let mut clock = 0;
     desktop.draw(&mut s, &network);
     s.present();
+    let mut shown = (desktop.mx, desktop.my);
+    s.pointer(None, shown);
     unsafe { hardware::log(b"KreativeOS: desktop ready\r\n") };
     loop {
         for _ in 0..32 {
             if let Some(e) = input.poll() {
-                dirty = true;
                 match e {
-                    Event::Key(k) => desktop.key(k, &mut network),
+                    Event::Key(k) => {
+                        desktop.key(k, &mut network);
+                        dirty = true;
+                    }
                     Event::Mouse(x, y, buttons, wheel) => {
-                        desktop.mouse(x, y, buttons, wheel, &s, &mut network)
+                        let previous = desktop.pointer_hover(s.w as i32, s.h as i32);
+                        let interactive = buttons != desktop.buttons
+                            || wheel != 0
+                            || desktop.drag.is_some()
+                            || desktop.painting;
+                        desktop.mouse(x, y, buttons, wheel, &s, &mut network);
+                        if interactive
+                            || previous != desktop.pointer_hover(s.w as i32, s.h as i32)
+                            || desktop.menu
+                        {
+                            dirty = true;
+                        }
                     }
                 }
             }
@@ -1251,13 +1530,13 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
         if network.tls_pending {
             desktop.draw(&mut s, &network);
             s.present();
+            shown = (desktop.mx, desktop.my);
+            s.pointer(None, shown);
             crate::secure::fetch(&mut network);
         }
         if network.changed {
             network.changed = false;
-            if !desktop.url.str().starts_with("file:") {
-                net::readable(network.body.str(), &mut desktop.page)
-            }
+            desktop.receive_web(&mut network);
             dirty = true
         }
         if desktop.windows[6].open
@@ -1274,8 +1553,15 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
         if dirty && hardware::millis() - last >= 16 {
             desktop.draw(&mut s, &network);
             s.present();
+            shown = (desktop.mx, desktop.my);
+            s.pointer(None, shown);
             dirty = false;
             last = hardware::millis()
+        }
+        let pointer = (desktop.mx, desktop.my);
+        if shown != pointer {
+            s.pointer(Some(shown), pointer);
+            shown = pointer;
         }
         core::hint::spin_loop();
     }
