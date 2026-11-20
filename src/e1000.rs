@@ -1,4 +1,5 @@
-//! Intel 82540EM / PRO/1000 MT. Polled legacy descriptor rings.
+//! Intel 8254x Ethernet with polled legacy descriptor rings.
+//! Compatible PCI IDs cross-checked against iPXE (https://ipxe.org).
 use crate::hardware::{millis, pci, pci_write};
 use core::{
     ptr,
@@ -12,11 +13,39 @@ const TX_BUFFERS: usize = RX_BUFFERS + COUNT * BUFFER;
 const RX_RING: usize = 0;
 const TX_RING: usize = 1024;
 
+#[derive(Clone, Copy)]
+pub enum Model {
+    I82540Em,
+    I82544Gc,
+    I82545Em,
+    I82574L,
+}
+impl Model {
+    pub fn from_pci(id: u32) -> Option<Self> {
+        match id {
+            0x100e8086 => Some(Self::I82540Em),
+            0x100c8086 => Some(Self::I82544Gc),
+            0x100f8086 => Some(Self::I82545Em),
+            0x10d38086 => Some(Self::I82574L),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::I82540Em => "Intel 82540EM",
+            Self::I82544Gc => "Intel 82544GC",
+            Self::I82545Em => "Intel 82545EM",
+            Self::I82574L => "Intel 82574L",
+        }
+    }
+}
+
 pub struct Adapter {
     registers: usize,
     dma: usize,
     rx: usize,
     tx: usize,
+    pub model: Model,
     pub mac: [u8; 6],
 }
 
@@ -35,13 +64,26 @@ impl Adapter {
         (self.dma + ring + index * 16) as *mut u8
     }
 
-    pub unsafe fn init(bus: u8, device: u8, function: u8, dma: usize) -> Option<Self> {
+    pub unsafe fn init(
+        bus: u8,
+        device: u8,
+        function: u8,
+        model: Model,
+        dma: usize,
+    ) -> Option<Self> {
         let bar = pci(bus, device, function, 0x10);
-        if bar & 7 != 0 || bar & !15 == 0 {
+        let address = bar & !15;
+        let mapped = match bar & 7 {
+            0 => true,
+            4 => pci(bus, device, function, 0x14) == 0,
+            _ => false,
+        };
+        if !mapped || address == 0 || address == 0xffff_fff0 {
             return None;
         }
         let mut a = Self {
-            registers: (bar & !15) as usize,
+            registers: address as usize,
+            model,
             dma,
             rx: 0,
             tx: 0,
@@ -59,21 +101,34 @@ impl Adapter {
         }
         a.set(0x00d8, u32::MAX);
         let _ = a.reg(0x00c0);
-        for word in 0..3 {
-            a.set(0x0014, 1 | ((word as u32) << 8));
-            let start = millis();
-            let value = loop {
-                let value = a.reg(0x0014);
-                if value & (1 << 4) != 0 {
-                    break value;
-                }
-                if millis() - start >= 120 {
-                    return None;
-                }
+        // RAL/RAH contain the address loaded by hardware or firmware.
+        let low = a.reg(0x5400).to_le_bytes();
+        a.mac[..4].copy_from_slice(&low);
+        let high = (a.reg(0x5404) as u16).to_le_bytes();
+        a.mac[4..].copy_from_slice(&high);
+        if !valid_mac(a.mac) {
+            // PCIe 82574 uses a 2-bit EERD command field. PCI 8254x uses 8 bits.
+            let (address_shift, done) = match model {
+                Model::I82574L => (2, 1 << 1),
+                _ => (8, 1 << 4),
             };
-            a.mac[word * 2..word * 2 + 2].copy_from_slice(&((value >> 16) as u16).to_le_bytes());
+            for word in 0..3 {
+                a.set(0x0014, 1 | ((word as u32) << address_shift));
+                let start = millis();
+                loop {
+                    let value = a.reg(0x0014);
+                    if value & done != 0 {
+                        a.mac[word * 2..word * 2 + 2]
+                            .copy_from_slice(&((value >> 16) as u16).to_le_bytes());
+                        break;
+                    }
+                    if millis() - start >= 120 {
+                        return None;
+                    }
+                }
+            }
         }
-        if a.mac == [0; 6] || a.mac[0] & 1 != 0 {
+        if !valid_mac(a.mac) {
             return None;
         }
         a.set(0x5400, u32::from_le_bytes(a.mac[..4].try_into().unwrap()));
@@ -166,4 +221,8 @@ impl Adapter {
         self.set(0x3818, self.tx as u32);
         true
     }
+}
+
+fn valid_mac(mac: [u8; 6]) -> bool {
+    mac != [0; 6] && mac[0] & 1 == 0
 }

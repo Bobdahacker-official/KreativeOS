@@ -49,7 +49,7 @@ F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches 
 
 ## Networking and hardware
 
-The supplied configuration uses QEMU user networking: IPv4 `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`. Ethernet supports PCI RTL8139 and Intel PRO/1000 MT Desktop (82540EM). QEMU defaults to RTL8139. Set `NIC_MODEL=e1000` to select the Intel adapter. The stack implements Ethernet, ARP, IPv4 validation, UDP DNS lookup and a single bounded TCP/HTTP connection with retransmission and timeout handling.
+The supplied configuration uses QEMU user networking: IPv4 `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`. Ethernet supports PCI RTL8139 and Intel 82540EM, 82544GC, 82545EM, and 82574L. QEMU defaults to RTL8139. Set `NIC_MODEL=e1000` for 82540EM or `NIC_MODEL=e1000e` for 82574L. The stack implements Ethernet, ARP, IPv4 validation, UDP DNS lookup and a single bounded TCP/HTTP connection with retransmission and timeout handling.
 
 Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. The browser shows page text, the first compatible HTML image and a Play sound button for the first WAV audio source. Direct HTTPS links to PNG, JPEG, BMP and WAV also open. Media responses are capped at 768 KiB. HTTP uses port 80 and HTTP/1.0 connection-close semantics. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. The browser supports authenticated HTTPS redirects and chunked response bodies. Plain HTTP uses the Ethernet interface.
 

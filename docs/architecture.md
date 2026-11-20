@@ -24,3 +24,9 @@ Source map:
 | `scripts/image.py` | FAT16 boot image creation |
 
 The image gallery loads bounded image packs using UEFI Simple File System before the kernel exits boot services. The native renderer shows PNG, JPEG and BMP in fit and actual-size modes. The Intel 82540EM path uses memory-mapped registers and separate polled RX and TX descriptor rings. Both Ethernet drivers share the same TCP and TLS code.
+
+## Ethernet expansion and native Wi-Fi port
+
+KreativeOS's Rust Intel driver uses PCI IDs cross-checked against [iPXE's Intel driver](https://github.com/ipxe/ipxe/blob/cb7718c14ae680f084398aa94b34ed285d5b011f/src/drivers/net/intel.c) and initializes the adapters through their shared legacy descriptor interface. It uses the firmware-loaded station address when valid and falls back to the controller-specific EEPROM read format.
+
+FreeBSD's [iwlwifi build definition](https://github.com/freebsd/freebsd-src/blob/releng/15.0/sys/modules/iwlwifi/Makefile) includes AX210 configuration, firmware and PNVM loading, PCIe transport, and MVM. FreeBSD connects the driver to its wireless stack through LinuxKPI and linuxkpi_wlan. A native port needs PCIe DMA and interrupt handling, deferred work and timers, firmware loading, and the wireless association and key-management interface. The first hardware milestone is AX210 firmware startup and scan results, followed by WPA2 association and packet I/O. Current Wi-Fi still uses ESP-AT.

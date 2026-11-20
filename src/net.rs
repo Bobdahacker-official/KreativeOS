@@ -110,8 +110,10 @@ impl Network {
                     if id == 0xffff_ffff {
                         continue;
                     }
-                    if id == 0x100e8086 && intel_slot.is_none() {
-                        intel_slot = Some((bus, slot, func));
+                    if let Some(model) = crate::e1000::Model::from_pci(id) {
+                        if intel_slot.is_none() {
+                            intel_slot = Some((bus, slot, func, model));
+                        }
                     }
                     if id == 0x813910ec && n.io == 0 {
                         let bar = pci(bus, slot, func, 0x10);
@@ -126,12 +128,14 @@ impl Network {
             }
         }
         if n.io == 0 {
-            if let Some((bus, slot, func)) = intel_slot {
-                if let Some(adapter) = crate::e1000::Adapter::init(bus, slot, func, DMA) {
+            if let Some((bus, slot, func, model)) = intel_slot {
+                if let Some(adapter) = crate::e1000::Adapter::init(bus, slot, func, model, DMA) {
                     n.mac = adapter.mac;
                     n.intel = Some(adapter);
                     n.status = "Ethernet ready: 10.0.2.15";
-                    log(b"KreativeOS: Intel 82540EM ready\r\n");
+                    log(b"KreativeOS: ");
+                    log(model.name().as_bytes());
+                    log(b" ready\r\n");
                 }
             }
             return n;
@@ -163,8 +167,8 @@ impl Network {
         n
     }
     pub fn adapter_name(&self) -> &'static str {
-        if self.intel.is_some() {
-            "Intel 82540EM"
+        if let Some(adapter) = &self.intel {
+            adapter.model.name()
         } else if self.io != 0 {
             "RTL8139"
         } else {
