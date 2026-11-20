@@ -57,7 +57,7 @@ struct BootServices {
     unload: usize,
     exit_boot: unsafe extern "efiapi" fn(usize, usize) -> usize,
     monotonic: usize,
-    stall: usize,
+    stall: unsafe extern "efiapi" fn(usize) -> usize,
     watchdog: unsafe extern "efiapi" fn(usize, u64, usize, *const u16) -> usize,
     connect: unsafe extern "efiapi" fn(usize, *mut usize, *mut c_void, u8) -> usize,
     disconnect: usize,
@@ -155,6 +155,7 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
     }
     connect_usb_storage(bs, free);
     load_pictures(bs, free);
+    inspect_ax210(bs, free);
     let screen = Screen {
         front: m.base as *mut u32,
         back: back as *mut u32,
@@ -202,12 +203,58 @@ struct EfiFile {
     read: unsafe extern "efiapi" fn(*mut Self, *mut usize, *mut u8) -> usize,
 }
 
+type BarAccess = unsafe extern "efiapi" fn(*mut PciIo, u32, u8, u64, usize, *mut u32) -> usize;
+
 #[repr(C)]
 struct PciIo {
     poll: [usize; 2],
-    memory: [usize; 2],
+    mem_read: BarAccess,
+    mem_write: BarAccess,
     io: [usize; 2],
     config_read: unsafe extern "efiapi" fn(*mut Self, u32, u32, usize, *mut u32) -> usize,
+}
+
+unsafe fn inspect_ax210(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut c_void) -> usize) {
+    use crate::ax210::{self, HardwareState};
+    let guid = Guid(
+        0x4cf5b200,
+        0x68b8,
+        0x4ca5,
+        [0x9e, 0xec, 0xb2, 0x3e, 0x3f, 0x50, 0x02, 0x9a],
+    );
+    let mut count = 0;
+    let mut handles = core::ptr::null_mut();
+    if (bs.locate_buffer)(2, &guid, core::ptr::null_mut(), &mut count, &mut handles) != 0 {
+        return;
+    }
+    for index in 0..count.min(512) {
+        let mut protocol = core::ptr::null_mut();
+        let handle = *handles.add(index);
+        if (bs.handle)(handle, &guid, &mut protocol) != 0 {
+            continue;
+        }
+        let pci = protocol.cast::<PciIo>();
+        let mut id = 0;
+        if ((*pci).config_read)(pci, 2, 0, 1, &mut id) != 0 || id != 0x2725_8086 {
+            continue;
+        }
+        let read = |offset| {
+            let mut value = 0;
+            (((*pci).mem_read)(pci, 2, 0, offset, 1, &mut value) == 0 && value != u32::MAX)
+                .then_some(value)
+        };
+        let write = |offset, mut value| ((*pci).mem_write)(pci, 2, 0, offset, 1, &mut value) == 0;
+        // Never touch device registers unless a complete firmware container was staged.
+        ax210::HARDWARE = if ax210::staged_firmware().is_some() {
+            ax210::prepare_bar(read, write, || {
+                (bs.stall)(10);
+            })
+        } else {
+            HardwareState::NotAttempted
+        };
+        break;
+    }
+    free(handles.cast());
 }
 
 unsafe fn connect_usb_storage(

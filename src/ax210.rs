@@ -1,4 +1,4 @@
-//! Native AX210 discovery and Intel firmware staging. No device DMA is started.
+//! Native AX210 discovery, firmware staging, and PCI ownership probing.
 use crate::{hardware, text::Text};
 use core::fmt::Write;
 
@@ -9,6 +9,7 @@ pub static mut FIRMWARE_LEN: usize = 0;
 pub struct Status {
     pub pci: Option<(u8, u8, u8)>,
     pub firmware: Option<FirmwareInfo>,
+    pub hardware: HardwareState,
 }
 
 #[derive(Clone, Copy)]
@@ -16,6 +17,71 @@ pub struct FirmwareInfo {
     pub version: u32,
     pub runtime_sections: usize,
     pub init_sections: usize,
+}
+
+#[derive(Clone, Copy)]
+pub enum HardwareState {
+    NotAttempted,
+    BarUnavailable,
+    UnrecognizedRadio,
+    OwnershipTimeout,
+    OwnershipReady,
+}
+
+pub static mut HARDWARE: HardwareState = HardwareState::NotAttempted;
+
+pub unsafe fn staged_firmware() -> Option<FirmwareInfo> {
+    parse(&FIRMWARE[..FIRMWARE_LEN])
+}
+
+/// Read identity and take the PCI ownership handshake from Intel's AX210
+/// control registers, as used by FreeBSD iwlwifi. Release ownership before
+/// returning because no firmware transport or interrupt handler is installed.
+pub fn prepare_bar(
+    read: impl Fn(u64) -> Option<u32>,
+    write: impl Fn(u64, u32) -> bool,
+    mut delay: impl FnMut(),
+) -> HardwareState {
+    const IF_CONFIG: u64 = 0x000;
+    const HW_REV: u64 = 0x028;
+    const RF_ID: u64 = 0x09c;
+    const PCI_OWN: u32 = 1 << 22;
+
+    let Some(revision) = read(HW_REV) else {
+        return HardwareState::BarUnavailable;
+    };
+    let Some(radio) = read(RF_ID) else {
+        return HardwareState::BarUnavailable;
+    };
+    // Typhoon Peak with a Garfield radio, matching the staged TY/GF image family.
+    if revision & 0xfff0 != 0x0420 || radio & 0x00fff000 != 0x0010d000 {
+        return HardwareState::UnrecognizedRadio;
+    }
+    let Some(original) = read(IF_CONFIG) else {
+        return HardwareState::BarUnavailable;
+    };
+    if !write(IF_CONFIG, original | PCI_OWN) {
+        return HardwareState::BarUnavailable;
+    }
+    let mut ready = false;
+    for _ in 0..10 {
+        if read(IF_CONFIG).is_some_and(|value| value & PCI_OWN != 0) {
+            ready = true;
+            break;
+        }
+        delay();
+    }
+    // Restore only the bit we set. Preserve any other hardware-updated bits.
+    if original & PCI_OWN == 0 {
+        if let Some(current) = read(IF_CONFIG) {
+            write(IF_CONFIG, current & !PCI_OWN);
+        }
+    }
+    if ready {
+        HardwareState::OwnershipReady
+    } else {
+        HardwareState::OwnershipTimeout
+    }
 }
 
 fn parse(bytes: &[u8]) -> Option<FirmwareInfo> {
@@ -64,7 +130,7 @@ pub fn probe() -> Status {
             }
         }
     }
-    let firmware = unsafe { parse(&FIRMWARE[..FIRMWARE_LEN]) };
+    let firmware = unsafe { staged_firmware() };
     if let Some(info) = firmware {
         let mut line: Text<128> = Text::new();
         let _ = write!(
@@ -79,6 +145,7 @@ pub fn probe() -> Status {
     Status {
         pci: found,
         firmware,
+        hardware: unsafe { HARDWARE },
     }
 }
 
@@ -88,8 +155,20 @@ impl Status {
             (Some((bus, slot, function)), Some(_)) => {
                 let _ = write!(
                     message,
-                    "AX210 {:02x}:{:02x}.{} | firmware staged, radio not started",
-                    bus, slot, function
+                    "AX210 {:02x}:{:02x}.{} | {}",
+                    bus,
+                    slot,
+                    function,
+                    match self.hardware {
+                        HardwareState::NotAttempted =>
+                            "firmware staged, PCI handshake not attempted",
+                        HardwareState::BarUnavailable => "firmware staged, BAR0 unavailable",
+                        HardwareState::UnrecognizedRadio => "firmware staged, unmatched radio",
+                        HardwareState::OwnershipTimeout =>
+                            "firmware staged, PCI ownership timed out",
+                        HardwareState::OwnershipReady =>
+                            "PCI handshake passed, firmware not uploaded",
+                    }
                 );
             }
             (Some(_), None) => message.set("AX210 detected | firmware missing or invalid"),
