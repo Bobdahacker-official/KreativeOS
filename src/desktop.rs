@@ -148,6 +148,7 @@ struct Desktop {
     audio_url: Option<Text<384>>,
     audio_clip: alloc::vec::Vec<u8>,
     web_status: &'static str,
+    native_wifi: crate::ax210::Status,
     wifi_ssid: Text<32>,
     wifi_pass: Text<63>,
     wifi_password_field: bool,
@@ -193,6 +194,7 @@ impl Desktop {
             audio_url: None,
             audio_clip: alloc::vec::Vec::new(),
             web_status: "",
+            native_wifi: crate::ax210::probe(),
             wifi_ssid: Text::new(),
             wifi_pass: Text::new(),
             wifi_password_field: false,
@@ -1320,6 +1322,15 @@ impl Desktop {
                     x + 150,
                     y + 303,
                     clip_label(self.wifi_status, w - 170, 1),
+                    MUTED,
+                    1,
+                );
+                let mut native = Text::new();
+                self.native_wifi.describe(&mut native);
+                s.text(
+                    x + 24,
+                    y + 354,
+                    clip_label(native.str(), w - 48, 1),
                     MUTED,
                     1,
                 );

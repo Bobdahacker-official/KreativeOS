@@ -78,6 +78,15 @@ if imports.is_dir():
         pictures = pack(paths)
         picture_cluster = allocate(pictures)
         image[root_pos+32:root_pos+64] = entry('IMAGES  KIP', 32, picture_cluster, len(pictures))
+firmware = os.environ.get('AX210_FIRMWARE')
+if firmware:
+    source = Path(firmware)
+    if not 88 <= source.stat().st_size <= 4 * 1024 * 1024:
+        raise ValueError('AX210 firmware must be between 88 bytes and 4 MiB')
+    data = source.read_bytes()
+    firmware_cluster = allocate(data)
+    slot = root_pos + (64 if image[root_pos+32] else 32)
+    image[slot:slot+32] = entry('AX210   UCO', 32, firmware_cluster, len(data))
 for i in range(2):
     pos = base + (reserved + i * fat_sectors) * sector
     image[pos:pos+len(fat)] = fat

@@ -273,6 +273,23 @@ unsafe fn load_pictures(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut 
         if ((*fs).open_volume)(fs, &mut root) != 0 {
             continue;
         }
+        use crate::ax210::{FIRMWARE, FIRMWARE_LEN, MAX_FIRMWARE};
+        if FIRMWARE_LEN == 0 {
+            // FAT 8.3 name: AX210.UCO.
+            let firmware_name = [92u16, 65, 88, 50, 49, 48, 46, 85, 67, 79, 0];
+            let mut firmware = core::ptr::null_mut();
+            if ((*root).open)(root, &mut firmware, firmware_name.as_ptr(), 1, 0) == 0 {
+                let mut length = MAX_FIRMWARE;
+                let result = ((*firmware).read)(firmware, &mut length, FIRMWARE.as_mut_ptr());
+                let mut count = 1;
+                let mut byte = 0;
+                let eof = ((*firmware).read)(firmware, &mut count, &mut byte) == 0 && count == 0;
+                ((*firmware).close)(firmware);
+                if result == 0 && eof && length <= MAX_FIRMWARE {
+                    FIRMWARE_LEN = length;
+                }
+            }
+        }
         let mut file = core::ptr::null_mut();
         let status = ((*root).open)(root, &mut file, filename.as_ptr(), 1, 0);
         if status == 0 {
@@ -282,7 +299,8 @@ unsafe fn load_pictures(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut 
             let mut tail = 0;
             let end = ((*file).read)(file, &mut extra, &mut tail);
             ((*file).close)(file);
-            if status == 0
+            if imported < VOLUMES.len()
+                && status == 0
                 && end == 0
                 && extra == 0
                 && length >= 4
@@ -295,7 +313,7 @@ unsafe fn load_pictures(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut 
             }
         }
         ((*root).close)(root);
-        if imported == VOLUMES.len() || offset >= IMPORT_LIMIT - 4 {
+        if (imported == VOLUMES.len() || offset >= IMPORT_LIMIT - 4) && FIRMWARE_LEN != 0 {
             break;
         }
     }
