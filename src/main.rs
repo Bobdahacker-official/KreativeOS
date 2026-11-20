@@ -20,6 +20,7 @@ mod hardware;
 mod hardware_center;
 mod memory;
 mod net;
+mod nvme;
 mod organizer;
 mod packages;
 mod pictures;

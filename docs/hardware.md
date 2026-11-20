@@ -12,6 +12,12 @@ The driver checks DMA and 48-bit LBA support, logical sector size and disk capac
 |---|---|
 | Physical SATA disk or SSD | Standard AHCI controller, directly attached SATA drive, 512-byte logical sectors, 48-bit LBA and a marked KFS image |
 | QEMU SATA profile | ICH9 AHCI with a dedicated data image. The guest negotiates and executes its own DMA commands. [QEMU AHCI implementation](https://github.com/qemu/qemu/blob/master/hw/ide/ahci.c) |
+| Physical PCIe NVMe SSD | Standard NVMe PCIe controller, a 512-byte namespace without metadata or protection information, and marked KFS media |
+| QEMU NVMe profile | PCIe NVMe controller with a marked KFS namespace. [QEMU NVMe documentation](https://www.qemu.org/docs/master/system/devices/nvme.html) |
 | Legacy IDE | Existing primary-master KFS data images remain usable with the IDE launch profile. |
 
-The kernel polls command completion and uses one dedicated DMA arena below 4 GiB. There is no automatic repartitioning, controller-wide reset, or disk hotplug workflow. Hardware Center can show NVMe, RAID-mode and USB controllers in PCI inventory. NVMe, RAID, ATAPI and USB storage use separate transports outside this driver's scope.
+The kernel polls command completion and gives each native controller driver a separate DMA arena below 4 GiB. There is no automatic repartitioning or disk hotplug workflow. AHCI does not perform a controller-wide reset. RAID, ATAPI and USB storage use separate transports outside these drivers' scope.
+
+## NVMe PCIe
+
+The kernel takes control of the PCIe controller through BAR0 and enables the NVM command set with 4 KiB DMA pages. It negotiates one I/O queue pair, issues Identify to enumerate active namespaces, and filters for a compatible block format before reading any KFS metadata. Submission and completion queues track phase, command ID and queue ID. Transfers use physical region page lists when the KFS record spans more than two DMA pages. Completion timeouts stop further submissions. The three KFS write stages each issue an NVMe Flush command. See [NVMe Base 2.0d](https://nvmexpress.org/wp-content/uploads/NVM-Express-Base-Specification-2.0d-2024.01.11-Ratified.pdf) and [NVM Command Set 1.0c](https://nvmexpress.org/wp-content/uploads/NVM-Express-NVM-Command-Set-Specification-1.0c-2022.10.03-Ratified.pdf).

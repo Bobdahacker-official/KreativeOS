@@ -3,7 +3,7 @@
 from pathlib import Path
 import struct, os
 from pack_images import pack
-from sata_image import create as create_sata
+from sata_image import create as create_data, NVME_MARKER
 ROOT = Path(__file__).resolve().parent.parent
 out = ROOT / os.environ.get('KREATIVE_BUILD_DIR', 'build')
 loader = (out / 'esp/EFI/BOOT/BOOTX64.EFI').read_bytes()
@@ -127,5 +127,8 @@ if not (out / 'KreativeOS-data.img').exists():
 # A separate marked disk lets AHCI distinguish writable KFS media from other disks.
 with_sata = out / 'KreativeOS-sata.img'
 if not with_sata.exists():
-    create_sata(with_sata)
+    create_data(with_sata)
+with_nvme = out / 'KreativeOS-nvme.img'
+if not with_nvme.exists():
+    create_data(with_nvme, marker=NVME_MARKER)
 print(f'Built KreativeOS.img: {len(image)} bytes; EFI loader: {len(loader)} bytes')

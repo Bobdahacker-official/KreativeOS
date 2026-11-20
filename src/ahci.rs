@@ -4,14 +4,12 @@ use crate::{
     text::Text,
 };
 use core::{
-    arch::asm,
     ptr,
     sync::atomic::{fence, Ordering},
 };
 
 pub const PAGES: usize = 16;
-pub const MARKER_LBA: u32 = 16;
-const MARKER: &[u8] = b"KreativeOS KFS AHCI data disk\0\x01";
+use crate::storage::{identity_mmio, marked_volume, MARKER_LBA, WRITE_LBAS};
 const CL: usize = 0;
 const RFIS: usize = 1024;
 const TABLE: usize = 1280;
@@ -61,28 +59,6 @@ unsafe fn reg(address: usize) -> u32 {
 }
 unsafe fn set(address: usize, value: u32) {
     ptr::write_volatile(address as *mut u32, value);
-}
-
-// This kernel inherits firmware page tables. Reject MMIO outside the identity map.
-unsafe fn mapped(address: usize) -> bool {
-    let (cr3, cr4): (usize, usize);
-    asm!("mov {}, cr3", "mov {}, cr4", out(reg) cr3, out(reg) cr4, options(nostack));
-    const PHYS: usize = 0x000f_ffff_ffff_f000;
-    let mut table = cr3 & PHYS;
-    let levels = if cr4 & (1 << 12) != 0 { 5 } else { 4 };
-    for level in (0..levels).rev() {
-        let shift = 12 + 9 * level;
-        let entry = ptr::read_volatile((table as *const usize).add((address >> shift) & 511));
-        if entry & 3 != 3 {
-            return false;
-        }
-        table = entry & PHYS;
-        if level == 0 || (level <= 2 && entry & (1 << 7) != 0) {
-            let mask = (1 << shift) - 1;
-            return (table & !mask) == (address & !mask);
-        }
-    }
-    false
 }
 
 impl Disk {
@@ -197,8 +173,7 @@ impl Disk {
         let end = u64::from(lba) + bytes.len() as u64 / 512;
         if bytes.is_empty()
             || end > self.sectors
-            || (write && !(2048..2258).contains(&lba))
-            || (write && end > 2258)
+            || (write && (!WRITE_LBAS.contains(&lba) || end > u64::from(WRITE_LBAS.end)))
         {
             return false;
         }
@@ -258,7 +233,7 @@ pub unsafe fn discover() -> Option<Disk> {
                 }
                 let bar = pci(b, d, f, 0x24);
                 let base = (bar & !15) as usize;
-                if bar & 7 != 0 || base < 0x100000 || !mapped(base) {
+                if bar & 7 != 0 || base < 0x100000 || !identity_mmio(base) {
                     continue;
                 }
                 let command = pci(b, d, f, 4) & 0xffff;
@@ -279,7 +254,7 @@ pub unsafe fn discover() -> Option<Disk> {
                 for port in 0..32 {
                     let regs = base + 0x100 + port as usize * 0x80;
                     if ports & (1 << port) == 0
-                        || !mapped(regs + 0x7f)
+                        || !identity_mmio(regs + 0x7f)
                         || reg(regs + SSTS) & 15 != 3
                         || !matches!(reg(regs + SIG), 0x0000_0101 | u32::MAX)
                     {
@@ -303,10 +278,8 @@ pub unsafe fn discover() -> Option<Disk> {
                     let mut first = [0u8; 512];
                     if disk.identify()
                         && disk.transfer(MARKER_LBA, &mut label, false)
-                        && label.starts_with(MARKER)
-                        && label[MARKER.len()..].iter().all(|&b| b == 0)
                         && disk.transfer(0, &mut first, false)
-                        && first.iter().all(|&b| b == 0)
+                        && marked_volume(&label, &first)
                     {
                         return Some(disk);
                     }

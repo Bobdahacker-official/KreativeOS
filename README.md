@@ -17,7 +17,7 @@ rustup target add x86_64-unknown-uefi
 bash scripts/build.sh
 ```
 
-The build produces `build/KreativeOS.img`, a 64 MiB partitioned UEFI boot disk, `build/esp/EFI/BOOT/BOOTX64.EFI`, and separate 8 MiB IDE and SATA data images. Existing data images are preserved on rebuild.
+The build produces `build/KreativeOS.img`, a 64 MiB partitioned UEFI boot disk, `build/esp/EFI/BOOT/BOOTX64.EFI`, and separate 8 MiB IDE, SATA and NVMe data images. Existing data images are preserved on rebuild.
 
 For QEMU, install `qemu-system-x86` and `ovmf`, then run:
 
@@ -36,6 +36,7 @@ rustup target add x86_64-unknown-uefi
 The headless launch writes serial output to `build/serial.log`. Omit `-Headless` to open the desktop. Set `KREATIVE_PYTHON` or `KREATIVE_QEMU` to the executable path if automatic discovery fails.
 
 Use `.\scripts\run.ps1 -Storage SATA -Headless` on Windows or `STORAGE=sata bash scripts/run.sh -display none` on Linux to use the native AHCI driver. Both commands attach the same type of data image used by the bare-metal driver.
+Use `.\scripts\run.ps1 -Storage NVME -Headless` or `STORAGE=nvme bash scripts/run.sh -display none` for the native NVMe driver.
 
 Set `OVMF_CODE` and `OVMF_VARS` if your firmware files use different paths. The supplied machine uses 256 MiB RAM, standard VGA, PS/2 input, RTL8139 Ethernet, a VirtIO boot disk (read by UEFI), and an IDE primary-master data disk. The operating system contains no Linux components; Linux, macOS or Windows can be used as a build host.
 
@@ -92,11 +93,11 @@ The gallery reads up to 36 imported images from packs totaling 6 MiB. Each image
 
 ## Files and packages
 
-KFS has 24 file entries, 32-byte ASCII names and 2 KiB per file. It stores snapshots in sectors 2048–2247, committing the header last. KreativeOS prefers a marked AHCI SATA volume and also supports a dedicated legacy primary-master ATA disk. Unrecognized nonblank KFS snapshots are rejected. A missing disk leaves files available in memory, and Save reports that state.
+KFS has 24 file entries, 32-byte ASCII names and 2 KiB per file. It stores snapshots in sectors 2048–2247, committing the header last. KreativeOS looks for marked NVMe media first, then marked AHCI SATA media, then a dedicated legacy primary-master ATA disk. It mounts one data volume. Unrecognized nonblank KFS snapshots are rejected. A missing disk leaves files available in memory, and Save reports that state.
 
-### SATA media and migration
+### SSDs, HDDs and data migration
 
-Build first to create `build/KreativeOS-sata.img`. For a physical PC, use UEFI boot and an AHCI controller in firmware settings. Write the boot and SATA data images to **separate dedicated media**. The AHCI driver requires a directly attached disk with 512-byte logical sectors. A marked disk can be larger than the image. The driver checks the marker and a blank sector 0 before selecting it, and its writes are limited to KFS snapshot and draft sectors.
+Use `build/KreativeOS-sata.img` with a SATA SSD or HDD and `build/KreativeOS-nvme.img` with an NVMe SSD. For a physical PC, use UEFI boot and an AHCI controller for SATA drives. Put the boot image and data image on **separate dedicated media**. Both native drivers require 512-byte logical sectors, including drives with 4 KiB physical sectors that expose 512-byte logical sectors. A marked disk can be larger than the image. The drivers check the marker and a blank sector 0 before selecting a volume and limit writes to the KFS snapshot and draft areas.
 
 To copy legacy files and accounts to a new SATA image while keeping the original image:
 
@@ -105,6 +106,8 @@ python scripts/sata_image.py build/migrated-sata.img --from-ide build/KreativeOS
 ```
 
 Set `KREATIVE_DATA_IMAGE` to the new image and select the SATA launch profile. The migration script refuses to overwrite an existing output file. See [hardware research](docs/hardware.md) for the driver design and compatibility boundaries.
+
+Add `--nvme` to that command to create a new NVMe image from the legacy IDE image. Existing marked SATA images also work with the NVMe profile. To move an existing SATA volume, make a copy of its image and point `KREATIVE_DATA_IMAGE` at the copy.
 
 Terminal examples:
 

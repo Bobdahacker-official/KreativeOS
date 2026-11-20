@@ -1,4 +1,4 @@
-//! KFS: two alternating, checksummed snapshots on a dedicated AHCI or IDE disk.
+//! KFS: alternating, checksummed snapshots on dedicated NVMe, SATA or IDE media.
 use crate::{hardware::*, text::Text};
 pub const COUNT: usize = 24;
 pub const CAP: usize = 2048;
@@ -8,6 +8,47 @@ const SNAP_A: u32 = 2048;
 const SNAP_B: u32 = SNAP_A + SNAP_SECTORS as u32;
 const DRAFT_SECTORS: usize = 5;
 const DRAFT_START: u32 = SNAP_B + SNAP_SECTORS as u32;
+pub const MARKER_LBA: u32 = 16;
+pub const WRITE_LBAS: core::ops::Range<u32> = SNAP_A..DRAFT_START + 2 * DRAFT_SECTORS as u32;
+const LABELS: [&[u8]; 2] = [
+    b"KreativeOS KFS AHCI data disk\0\x01",
+    b"KreativeOS KFS data disk\0\x01",
+];
+
+pub fn marked_volume(label: &[u8; 512], first: &[u8; 512]) -> bool {
+    first.iter().all(|&b| b == 0)
+        && LABELS.iter().any(|marker| {
+            label
+                .strip_prefix(*marker)
+                .is_some_and(|rest| rest.iter().all(|&b| b == 0))
+        })
+}
+
+// Kernel MMIO currently uses the firmware's identity map.
+pub unsafe fn identity_mmio(address: usize) -> bool {
+    use core::{arch::asm, ptr};
+    let (cr3, cr4): (usize, usize);
+    asm!("mov {}, cr3", "mov {}, cr4", out(reg) cr3, out(reg) cr4, options(nostack));
+    const PHYS: usize = 0x000f_ffff_ffff_f000;
+    let mut table = cr3 & PHYS;
+    let levels = if cr4 & (1 << 12) != 0 { 5 } else { 4 };
+    if address >= 1 << (12 + 9 * levels - 1) {
+        return false;
+    }
+    for level in (0..levels).rev() {
+        let shift = 12 + 9 * level;
+        let entry = ptr::read_volatile((table as *const usize).add((address >> shift) & 511));
+        if entry & 3 != 3 {
+            return false;
+        }
+        table = entry & PHYS;
+        if level == 0 || (level <= 2 && entry & (1 << 7) != 0) {
+            let mask = (1 << shift) - 1;
+            return (table & !mask) == (address & !mask);
+        }
+    }
+    false
+}
 #[derive(Clone, Copy)]
 pub struct File {
     pub name: Text<32>,
@@ -25,7 +66,20 @@ impl File {
 }
 pub static mut FILES: [File; COUNT] = [File::new(); COUNT];
 pub static mut DISK: bool = false;
-static mut SATA: Option<crate::ahci::Disk> = None;
+enum Driver {
+    Ide,
+    Ahci(crate::ahci::Disk),
+    Nvme(crate::nvme::Disk),
+}
+static mut DRIVER: Option<Driver> = None;
+
+unsafe fn dma_transfer(base: u32, data: &mut [u8], write: bool) -> Option<bool> {
+    match &mut DRIVER {
+        Some(Driver::Ahci(disk)) => Some(disk.transfer(base, data, write)),
+        Some(Driver::Nvme(disk)) => Some(disk.transfer(base, data, write)),
+        _ => None,
+    }
+}
 static mut GEN: u32 = 0;
 static mut BUFFER: [u8; SNAP] = [0; SNAP];
 static mut OTHER: [u8; SNAP] = [0; SNAP];
@@ -105,8 +159,8 @@ fn snapshot_base(generation: u32) -> u32 {
 }
 
 unsafe fn read_record(base: u32, record: &mut [u8]) -> bool {
-    if let Some(disk) = &mut SATA {
-        return disk.transfer(base, record, false);
+    if let Some(status) = dma_transfer(base, record, false) {
+        return status;
     }
     record
         .chunks_exact_mut(512)
@@ -117,10 +171,10 @@ unsafe fn read_record(base: u32, record: &mut [u8]) -> bool {
 unsafe fn publish_record(base: u32, record: &mut [u8]) -> bool {
     let (header, body) = record.split_at_mut(512);
     // Keep the other slot readable throughout this write. Publish the header last.
-    if let Some(disk) = &mut SATA {
-        return disk.transfer(base, &mut [0; 512], true)
-            && disk.transfer(base + 1, body, true)
-            && disk.transfer(base, header, true);
+    if let Some(status) = dma_transfer(base, &mut [0; 512], true) {
+        return status
+            && dma_transfer(base + 1, body, true) == Some(true)
+            && dma_transfer(base, header, true) == Some(true);
     }
     sector(base, &mut [0; 512], true)
         && body
@@ -146,14 +200,18 @@ unsafe fn load(b: &[u8]) {
     }
 }
 pub unsafe fn init() {
-    SATA = crate::ahci::discover();
-    DISK = SATA.is_some();
-    if !DISK {
+    DRIVER = crate::nvme::discover()
+        .map(Driver::Nvme)
+        .or_else(|| crate::ahci::discover().map(Driver::Ahci));
+    if DRIVER.is_none() {
         // Legacy dedicated primary-master data disk.
         out8(0x1f6, 0xe0);
         let s = in8(0x1f7);
-        DISK = s != 0 && s != 255;
+        if s != 0 && s != 255 {
+            DRIVER = Some(Driver::Ide);
+        }
     }
+    DISK = DRIVER.is_some();
     if DISK {
         let read_a = read_record(SNAP_A, &mut BUFFER);
         let read_b = read_record(SNAP_B, &mut OTHER);
@@ -184,27 +242,56 @@ pub unsafe fn init() {
     if find("Readme.html").is_none() {
         let _=put("Readme.html",b"<h1>KreativeOS Browser</h1><p>This page is stored locally.</p><p>Open http://example.com for an HTTP website.</p>");
     }
-    if DISK && SATA.is_some() {
-        log(b"KreativeOS: KFS mounted through AHCI\r\n");
+    if DISK {
+        match DRIVER {
+            Some(Driver::Nvme(_)) => log(b"KreativeOS: KFS mounted through NVMe\r\n"),
+            Some(Driver::Ahci(_)) => log(b"KreativeOS: KFS mounted through AHCI\r\n"),
+            _ => {}
+        }
     }
     log(b"KreativeOS: filesystem mounted\r\n");
 }
 
 pub fn backend() -> &'static str {
     unsafe {
-        match (DISK, SATA.is_some()) {
-            (true, true) => "SATA / AHCI DMA",
-            (true, false) => "IDE / ATA PIO",
-            (false, true) => "AHCI volume rejected",
+        match (DISK, &DRIVER) {
+            (true, Some(Driver::Nvme(_))) => "PCIe / NVMe",
+            (true, Some(Driver::Ahci(_))) => "SATA / AHCI DMA",
+            (true, Some(Driver::Ide)) => "IDE / ATA PIO",
+            (false, Some(Driver::Nvme(_))) => "NVMe volume rejected",
+            (false, Some(Driver::Ahci(_))) => "AHCI volume rejected",
             _ => "Memory only",
         }
     }
 }
 
-pub fn sata_details() -> Option<((u8, u8, u8), u8, u64, Text<40>)> {
+pub struct DriveDetails {
+    pub bdf: (u8, u8, u8),
+    pub location: &'static str,
+    pub unit: u32,
+    pub sectors: u64,
+    pub model: Text<40>,
+}
+
+pub fn drive_details() -> Option<DriveDetails> {
     unsafe {
-        SATA.as_ref()
-            .map(|disk| (disk.bdf, disk.port, disk.sectors, disk.model))
+        match &DRIVER {
+            Some(Driver::Nvme(disk)) => Some(DriveDetails {
+                bdf: disk.bdf,
+                location: "Namespace",
+                unit: disk.namespace,
+                sectors: disk.sectors,
+                model: disk.model,
+            }),
+            Some(Driver::Ahci(disk)) => Some(DriveDetails {
+                bdf: disk.bdf,
+                location: "Port",
+                unit: u32::from(disk.port),
+                sectors: disk.sectors,
+                model: disk.model,
+            }),
+            _ => None,
+        }
     }
 }
 

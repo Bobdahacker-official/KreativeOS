@@ -22,7 +22,7 @@ jobs:
           sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/kreative-apt.list" -o Dir::Etc::sourceparts=- -o Acquire::https::Timeout=20 update -qq
           sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/kreative-apt.list" -o Dir::Etc::sourceparts=- -o Acquire::https::Timeout=20 install -y --no-install-recommends qemu-system-x86 ovmf
       - name: Boot once and capture desktop
-        run: STORAGE=sata python3 scripts/smoke.py
+        run: STORAGE=nvme python3 scripts/smoke.py
       - name: Verify HTTPS over Intel Ethernet and certificate rejection
         run: NIC_MODEL=e1000e python3 scripts/tls_check.py
       - name: Upload boot image and build evidence
@@ -34,6 +34,7 @@ jobs:
             build/KreativeOS.img
             build/KreativeOS-data.img
             build/KreativeOS-sata.img
+            build/KreativeOS-nvme.img
             build/esp/EFI/BOOT/BOOTX64.EFI
             build/SHA256SUMS
             build/desktop.png

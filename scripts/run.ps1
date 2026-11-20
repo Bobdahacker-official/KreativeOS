@@ -1,4 +1,4 @@
-param([switch]$Headless, [ValidateSet('IDE', 'SATA')][string]$Storage = 'IDE')
+param([switch]$Headless, [ValidateSet('IDE', 'SATA', 'NVME')][string]$Storage = 'IDE')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -16,7 +16,11 @@ try {
     $build = if ($env:KREATIVE_BUILD_DIR) { $env:KREATIVE_BUILD_DIR } else { 'build' }
     $vars = Join-Path $build 'OVMF_VARS.fd'
     $disk = Join-Path $build 'KreativeOS.img'
-    $data = Join-Path $build $(if ($Storage -eq 'SATA') { 'KreativeOS-sata.img' } else { 'KreativeOS-data.img' })
+    $data = Join-Path $build $(switch ($Storage) {
+        'SATA' { 'KreativeOS-sata.img' }
+        'NVME' { 'KreativeOS-nvme.img' }
+        default { 'KreativeOS-data.img' }
+    })
     if ($env:KREATIVE_DATA_IMAGE) { $data = $env:KREATIVE_DATA_IMAGE }
     $serial = Join-Path $build 'serial.log'
     foreach ($file in @($code, $template, $disk, $data)) {
@@ -37,6 +41,9 @@ try {
     if ($Storage -eq 'SATA') {
         $options += @('-device', 'ich9-ahci,id=kossata', '-drive', "if=none,id=kosdata,format=raw,file=$data",
                       '-device', 'ide-hd,drive=kosdata,bus=kossata.0')
+    } elseif ($Storage -eq 'NVME') {
+        $options += @('-drive', "if=none,id=kosdata,format=raw,file=$data",
+                      '-device', 'nvme,drive=kosdata,serial=KOSDATA001')
     } else {
         $options += @('-drive', "if=ide,index=0,format=raw,file=$data")
     }

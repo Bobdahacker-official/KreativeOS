@@ -108,11 +108,15 @@ impl Center {
             self.cpu.str(),
             storage::backend()
         );
-        if let Some(((bus, slot, function), port, sectors, model)) = storage::sata_details() {
+        if let Some(disk) = storage::drive_details() {
+            let (bus, slot, function) = disk.bdf;
             let _ = writeln!(
                 report,
-                "SATA: {} @ {bus:02x}:{slot:02x}.{function} / port {port} / {sectors} sectors",
-                model.str()
+                "{} @ {bus:02x}:{slot:02x}.{function} / {} {} / {} sectors",
+                disk.model.str(),
+                disk.location,
+                disk.unit,
+                disk.sectors
             );
         }
         let _ = writeln!(
@@ -238,15 +242,17 @@ impl Center {
                     storage::COUNT
                 );
                 card(s, x + 20, y + 203, w - 40, "KFS volume", value.str());
-                if let Some(((bus, slot, function), port, sectors, model)) = storage::sata_details()
-                {
+                if let Some(disk) = storage::drive_details() {
+                    let (bus, slot, function) = disk.bdf;
                     value.clear();
                     let _ = write!(
                         value,
-                        "{bus:02x}:{slot:02x}.{function}   /   Port {port}   /   {} MiB",
-                        sectors / 2048
+                        "{bus:02x}:{slot:02x}.{function}   /   {} {}   /   {} MiB",
+                        disk.location,
+                        disk.unit,
+                        disk.sectors / 2048
                     );
-                    card(s, x + 20, y + 250, w - 40, model.str(), value.str());
+                    card(s, x + 20, y + 250, w - 40, disk.model.str(), value.str());
                 }
             }
         }

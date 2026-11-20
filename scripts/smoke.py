@@ -27,6 +27,8 @@ try:
                            (log.read_text(errors='replace') if log.exists() else 'no serial log'))
     if os.environ.get('STORAGE') == 'sata':
         assert b'KFS mounted through AHCI' in log.read_bytes(), 'SATA profile did not mount KFS through AHCI'
+    if os.environ.get('STORAGE') == 'nvme':
+        assert b'KFS mounted through NVMe' in log.read_bytes(), 'NVMe profile did not mount KFS through NVMe'
     message()
     def command(name, args=None):
         p.stdin.write((json.dumps({'execute':name, 'arguments':args or {}})+'\n').encode())
