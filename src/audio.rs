@@ -45,6 +45,33 @@ pub unsafe fn init() {
 pub fn available() -> bool {
     unsafe { PORT != 0 }
 }
+pub fn volume(step: i8) -> Option<u8> {
+    unsafe {
+        if MIXER == 0 {
+            return None;
+        }
+        let register = MIXER + 0x02;
+        let previous = in16(register);
+        let level = if previous & 0x8000 != 0 {
+            0
+        } else {
+            32 - (previous & 31) as u8
+        };
+        let level = (i16::from(level) + i16::from(step)).clamp(0, 32) as u8;
+        if step != 0 {
+            let attenuation = u16::from(32u8.saturating_sub(level).min(31));
+            out16(
+                register,
+                if level == 0 {
+                    0x8000
+                } else {
+                    attenuation * 0x101
+                },
+            );
+        }
+        Some((u16::from(level) * 100 / 32) as u8)
+    }
+}
 pub fn stop() {
     unsafe {
         if PORT != 0 {

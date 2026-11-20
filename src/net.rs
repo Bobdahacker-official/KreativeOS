@@ -1,10 +1,11 @@
 //! RTL8139 + Ethernet/ARP/IPv4/UDP/DNS/TCP/HTTP. All wire reads are length checked.
-use crate::{hardware::*, text::Text};
+use crate::{
+    dhcp::{self, Address, Config, Offer},
+    hardware::*,
+    text::Text,
+};
 use alloc::collections::VecDeque;
 pub static mut DMA: usize = 0;
-const IP: [u8; 4] = [10, 0, 2, 15];
-const GATE: [u8; 4] = [10, 0, 2, 2];
-const DNS: [u8; 4] = [10, 0, 2, 3];
 fn u16be(b: &[u8], n: usize) -> u16 {
     u16::from_be_bytes([b[n], b[n + 1]])
 }
@@ -31,6 +32,12 @@ fn fold(mut s: u32) -> u16 {
     !(s as u16)
 }
 pub struct Network {
+    pub config: Config,
+    pub vlan: u16,
+    pub ethernet_status: &'static str,
+    dhcp: Option<Discovery>,
+    lease_until: Option<u64>,
+    next_hop: Address,
     io: u16,
     intel: Option<crate::e1000::Adapter>,
     pub wifi: crate::wifi::Module,
@@ -38,13 +45,14 @@ pub struct Network {
     pub mac: [u8; 6],
     pub received: u64,
     pub sent: u64,
+    pub received_bytes: u64,
+    pub sent_bytes: u64,
     pub status: &'static str,
     pub body: Text<12288>,
     pub changed: bool,
     rx: usize,
     tx: usize,
     gateway: [u8; 6],
-    have_gateway: bool,
     remote: [u8; 4],
     pub host: Text<128>,
     pub path: Text<256>,
@@ -65,9 +73,21 @@ pub struct Network {
     last: [u8; 1536],
     last_len: usize,
 }
+struct Discovery {
+    xid: u32,
+    offer: Option<Offer>,
+    attempt: u8,
+    deadline: u64,
+}
 impl Network {
     pub unsafe fn new() -> Self {
         let mut n = Self {
+            config: Config::QEMU,
+            vlan: 0,
+            ethernet_status: "Static IPv4",
+            dhcp: None,
+            lease_until: None,
+            next_hop: [0; 4],
             io: 0,
             wifi: crate::wifi::Module::new(),
             response: None,
@@ -75,13 +95,14 @@ impl Network {
             mac: [0; 6],
             received: 0,
             sent: 0,
+            received_bytes: 0,
+            sent_bytes: 0,
             status: "No supported Ethernet adapter",
             body: Text::new(),
             changed: true,
             rx: 0,
             tx: 0,
             gateway: [0; 6],
-            have_gateway: false,
             remote: [0; 4],
             host: Text::new(),
             path: Text::new(),
@@ -178,13 +199,140 @@ impl Network {
     pub fn online(&self) -> bool {
         self.io != 0 || self.intel.is_some()
     }
+    pub fn link_speed(&self) -> Option<u16> {
+        if let Some(adapter) = &self.intel {
+            adapter.link_speed()
+        } else if self.io != 0 {
+            let status = unsafe { in8(self.io + 0x58) };
+            match status & 12 {
+                0 => Some(100),
+                8 => Some(10),
+                _ => None,
+            }
+        } else {
+            None
+        }
+    }
+    pub fn static_config(&mut self, config: Config, vlan: u16) -> bool {
+        let mask = u32::from_be_bytes(config.mask);
+        if self.state != 0
+            || vlan > 4094
+            || config.ip == [0; 4]
+            || config.ip[0] >= 224
+            || (mask | mask.wrapping_sub(1)) != u32::MAX
+        {
+            return false;
+        }
+        self.config = config;
+        self.vlan = vlan;
+        self.dhcp = None;
+        self.lease_until = None;
+        self.ethernet_status = "Static IPv4";
+        true
+    }
+    pub fn start_dhcp(&mut self, vlan: u16) -> bool {
+        if !self.online() || self.state != 0 || vlan > 4094 {
+            return false;
+        }
+        self.vlan = vlan;
+        self.config.ip = [0; 4];
+        self.lease_until = None;
+        self.ethernet_status = "Looking for a DHCP server";
+        self.dhcp = Some(Discovery {
+            xid: ticks() as u32,
+            offer: None,
+            attempt: 0,
+            deadline: millis(),
+        });
+        true
+    }
+    fn dhcp_tick(&mut self) {
+        if self.lease_until.is_some_and(|end| millis() >= end) {
+            self.config.ip = [0; 4];
+            if self.state != 0 {
+                self.fail("Ethernet DHCP lease expired");
+            }
+            self.start_dhcp(self.vlan);
+        }
+        let Some(state) = &mut self.dhcp else { return };
+        if millis() < state.deadline {
+            return;
+        }
+        if state.attempt == 4 {
+            self.dhcp = None;
+            self.ethernet_status = "DHCP timed out";
+            return;
+        }
+        let packet = dhcp::request(state.xid, self.mac, state.offer);
+        state.deadline = millis() + (1000 << state.attempt);
+        state.attempt += 1;
+        let mut frame = [0; 342];
+        frame[..6].fill(255);
+        frame[6..12].copy_from_slice(&self.mac);
+        w16(&mut frame, 12, 0x0800);
+        frame[14] = 0x45;
+        w16(&mut frame, 16, 328);
+        frame[22] = 64;
+        frame[23] = 17;
+        frame[30..34].fill(255);
+        let checksum = fold(sum(&frame[14..34]));
+        w16(&mut frame, 24, checksum);
+        w16(&mut frame, 34, 68);
+        w16(&mut frame, 36, 67);
+        w16(&mut frame, 38, 308);
+        frame[42..].copy_from_slice(&packet);
+        self.transmit(&frame);
+    }
+    fn dhcp_reply(&mut self, packet: &[u8]) {
+        let Some(state) = &mut self.dhcp else { return };
+        let Some((kind, offer)) = dhcp::reply(packet, state.xid, self.mac) else {
+            return;
+        };
+        match (kind, state.offer) {
+            (2, None) if offer.server != [0; 4] && offer.config.ip != [0; 4] => {
+                state.offer = Some(offer);
+                state.attempt = 0;
+                state.deadline = millis();
+            }
+            (5, Some(previous))
+                if previous.server == offer.server
+                    && previous.config.ip == offer.config.ip
+                    && offer.seconds != 0 =>
+            {
+                self.config = offer.config;
+                self.lease_until = Some(millis().saturating_add(u64::from(offer.seconds) * 1000));
+                self.ethernet_status = "DHCP lease active";
+                self.dhcp = None;
+                unsafe { log(b"KreativeOS: Ethernet DHCP lease acquired\r\n") };
+            }
+            (6, Some(previous)) if previous.server == offer.server => {
+                self.dhcp = None;
+                self.ethernet_status = "DHCP lease rejected";
+            }
+            _ => {}
+        }
+    }
     fn transmit(&mut self, frame: &[u8]) {
+        let mut tagged = [0; 1536];
+        let frame = if self.vlan != 0 {
+            if !(14..=1532).contains(&frame.len()) {
+                return;
+            }
+            tagged[..12].copy_from_slice(&frame[..12]);
+            w16(&mut tagged, 12, 0x8100);
+            w16(&mut tagged, 14, self.vlan);
+            tagged[16..frame.len() + 4].copy_from_slice(&frame[12..]);
+            &tagged[..frame.len() + 4]
+        } else {
+            frame
+        };
         if !self.online() || frame.len() > 1536 {
             return;
         }
         if let Some(adapter) = &mut self.intel {
             if adapter.transmit(frame) {
                 self.sent += 1;
+                self.sent_bytes += frame.len() as u64;
             }
             return;
         }
@@ -203,6 +351,7 @@ impl Network {
             out32(self.io + 0x10 + slot as u16 * 4, frame.len().max(60) as u32);
             self.tx += 1;
             self.sent += 1;
+            self.sent_bytes += frame.len() as u64;
         }
     }
     fn arp(&mut self, reply: bool, target_mac: [u8; 6], target_ip: [u8; 4]) {
@@ -216,7 +365,7 @@ impl Network {
         p[19] = 4;
         w16(&mut p, 20, if reply { 2 } else { 1 });
         p[22..28].copy_from_slice(&self.mac);
-        p[28..32].copy_from_slice(&IP);
+        p[28..32].copy_from_slice(&self.config.ip);
         p[32..38].copy_from_slice(&target_mac);
         p[38..42].copy_from_slice(&target_ip);
         self.transmit(&p)
@@ -233,7 +382,7 @@ impl Network {
         w16(&mut f, 16, (20 + payload.len()) as u16);
         f[22] = 64;
         f[23] = protocol;
-        f[26..30].copy_from_slice(&IP);
+        f[26..30].copy_from_slice(&self.config.ip);
         f[30..34].copy_from_slice(&dest);
         let c = fold(sum(&f[14..34]));
         w16(&mut f, 24, c);
@@ -273,7 +422,7 @@ impl Network {
         w16(&mut p, 4, len as u16);
         self.state = 2;
         self.status = "Resolving hostname";
-        self.ip_send(DNS, 17, &p[..len], true)
+        self.ip_send(self.config.dns, 17, &p[..len], true)
     }
     fn tcp(&mut self, flags: u8, data: &[u8], remember: bool) {
         let mut p = [0u8; 1460];
@@ -289,7 +438,7 @@ impl Network {
         w16(&mut p, 14, 16384);
         p[20..20 + data.len()].copy_from_slice(data);
         let len = 20 + data.len();
-        let c = fold(sum(&IP) + sum(&self.remote) + 6 + len as u32 + sum(&p[..len]));
+        let c = fold(sum(&self.config.ip) + sum(&self.remote) + 6 + len as u32 + sum(&p[..len]));
         w16(&mut p, 16, c);
         self.ip_send(self.remote, 6, &p[..len], remember)
     }
@@ -316,7 +465,6 @@ impl Network {
         self.raw_eof = false;
         self.raw_waiting = false;
         self.changed = true;
-        self.have_gateway = false;
         self.last_len = 0;
         if !self.online() && !self.wifi.joined {
             self.fail("Connect Ethernet or Wi-Fi");
@@ -394,16 +542,39 @@ impl Network {
             self.remote = [0; 4]
         }
         self.port = 49152 + (ticks() % 15000) as u16;
+        if self.dhcp.is_some() || self.config.ip == [0; 4] {
+            self.fail("Ethernet has no active IPv4 lease");
+            return;
+        }
+        self.resolve_hop(if self.remote == [0; 4] {
+            self.config.dns
+        } else {
+            self.remote
+        });
+    }
+    fn resolve_hop(&mut self, destination: Address) {
+        let on_link =
+            (0..4).all(|i| (destination[i] ^ self.config.ip[i]) & self.config.mask[i] == 0);
+        self.next_hop = if on_link {
+            destination
+        } else {
+            self.config.router
+        };
+        if destination == [0; 4] || self.next_hop == [0; 4] {
+            self.fail("No IPv4 route or DNS server configured");
+            return;
+        }
         self.state = 1;
-        self.status = "Finding Ethernet gateway";
+        self.status = "Resolving Ethernet address";
         self.retries = 0;
         self.deadline = millis() + 1000;
-        self.arp(false, [0; 6], GATE)
+        self.arp(false, [0; 6], self.next_hop)
     }
     pub fn poll(&mut self) {
         if !self.online() {
             return;
         }
+        self.dhcp_tick();
         for _ in 0..16 {
             let mut f = [0u8; 1536];
             let len = if let Some(adapter) = &mut self.intel {
@@ -419,7 +590,7 @@ impl Network {
                     let p = (DMA + self.rx) as *const u8;
                     let status = core::ptr::read_volatile(p as *const u16);
                     let len = core::ptr::read_volatile(p.add(2) as *const u16) as usize;
-                    if len < 4 || len > 1522 {
+                    if !(4..=1522).contains(&len) {
                         out8(self.io + 0x37, 4);
                         self.rx = 0;
                         out32(self.io + 0x30, DMA as u32);
@@ -443,6 +614,7 @@ impl Network {
                 }
             };
             self.received += 1;
+            self.received_bytes += len as u64;
             self.frame(&f[..len]);
         }
         if self.state != 0 && (self.state != 6 || self.raw_waiting) && millis() > self.deadline {
@@ -452,7 +624,7 @@ impl Network {
                 self.retries += 1;
                 self.deadline = millis() + 1500;
                 if self.state == 1 {
-                    self.arp(false, [0; 6], GATE)
+                    self.arp(false, [0; 6], self.next_hop)
                 } else if self.state == 2 || self.state == 3 || self.state == 4 || self.raw_waiting
                 {
                     let mut copy = [0u8; 1536];
@@ -486,9 +658,21 @@ impl Network {
         if f.len() < 14 {
             return;
         }
+        let mut untagged = [0; 1536];
+        let f = if self.vlan != 0 {
+            if f.len() < 18 || u16be(f, 12) != 0x8100 || u16be(f, 14) & 0x0fff != self.vlan {
+                return;
+            }
+            untagged[..12].copy_from_slice(&f[..12]);
+            untagged[12..f.len() - 4].copy_from_slice(&f[16..]);
+            &untagged[..f.len() - 4]
+        } else {
+            f
+        };
         match u16be(f, 12) {
             0x0806 => {
-                if f.len() < 42
+                if self.config.ip == [0; 4]
+                    || f.len() < 42
                     || u16be(f, 14) != 1
                     || u16be(f, 16) != 0x800
                     || f[18] != 6
@@ -500,12 +684,11 @@ impl Network {
                 mac.copy_from_slice(&f[22..28]);
                 let mut addr = [0; 4];
                 addr.copy_from_slice(&f[28..32]);
-                if u16be(f, 20) == 1 && f[38..42] == IP {
+                if u16be(f, 20) == 1 && f[38..42] == self.config.ip {
                     self.arp(true, mac, addr)
                 }
-                if addr == GATE && f[38..42] == IP {
+                if addr == self.next_hop && f[38..42] == self.config.ip {
                     self.gateway = mac;
-                    self.have_gateway = true;
                     if self.state == 1 {
                         if self.remote == [0; 4] {
                             self.dns()
@@ -529,16 +712,25 @@ impl Network {
             || h > p.len()
             || total < h
             || total > p.len()
-            || p[16..20] != IP
             || u16be(p, 6) & 0x3fff != 0
             || fold(sum(&p[..h])) != 0
         {
             return;
         }
         let d = &p[h..total];
+        if p[9] == 17 && d.len() >= 8 && u16be(d, 0) == 67 && u16be(d, 2) == 68 {
+            let size = u16be(d, 4) as usize;
+            if let Some(bootp) = d.get(8..size) {
+                self.dhcp_reply(bootp);
+            }
+            return;
+        }
+        if p[16..20] != self.config.ip {
+            return;
+        }
         if p[9] == 17
             && self.state == 2
-            && p[12..16] == DNS
+            && p[12..16] == self.config.dns
             && d.len() >= 20
             && u16be(d, 0) == 53
             && u16be(d, 2) == 53000
@@ -581,7 +773,7 @@ impl Network {
                 }
                 if kind == 1 && class == 1 && len == 4 {
                     self.remote.copy_from_slice(&q[pos..pos + 4]);
-                    self.connect();
+                    self.resolve_hop(self.remote);
                     return;
                 }
                 pos += len

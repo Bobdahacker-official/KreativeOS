@@ -3,7 +3,7 @@ use tiny_skia::{
     FillRule, FilterQuality, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke,
     Transform,
 };
-static mut SYMBOLS: [[u8; 400]; 14] = [[0; 400]; 14];
+static mut SYMBOLS: [[u8; 400]; 15] = [[0; 400]; 15];
 static mut POINTER: Option<Pixmap> = None;
 static mut IMAGE_CACHE: Vec<(usize, i32, i32, Pixmap)> = Vec::new();
 
@@ -111,6 +111,7 @@ pub struct Screen {
     pub stride: usize,
     pub rgb: bool,
     pub clip: Option<Clip>,
+    pub theme: u8,
 }
 pub fn mix(a: u32, b: u32, t: u32) -> u32 {
     let u = 255 - t;
@@ -134,6 +135,27 @@ pub fn text_width(s: &str, scale: i32) -> i32 {
     s.bytes().map(|b| advance(b, scale)).sum()
 }
 impl Screen {
+    fn theme_color(&self, color: u32) -> u32 {
+        if self.theme == 0 {
+            return color;
+        }
+        let red = color >> 16 & 255;
+        let green = color >> 8 & 255;
+        let blue = color & 255;
+        let lightness = (red * 3 + green * 6 + blue) / 10;
+        if self.theme == 2 {
+            return match lightness {
+                0..=75 => 0xffffff,
+                76..=140 => 0xffde61,
+                _ => 0x000000,
+            };
+        }
+        let target = 245u32.saturating_sub(lightness * 9 / 10);
+        let channel = |value: u32| {
+            (target as i32 + (value as i32 - lightness as i32) / 2).clamp(0, 255) as u32
+        };
+        channel(red) << 16 | channel(green) << 8 | channel(blue)
+    }
     pub fn clip_rect(&mut self, x: i32, y: i32, w: i32, h: i32) -> Option<Clip> {
         let old = self.clip;
         let Clip(l, t, r, b) = old.unwrap_or(Clip(0, 0, self.w as i32, self.h as i32));
@@ -152,6 +174,10 @@ impl Screen {
         }
     }
     pub fn blend(&mut self, x: i32, y: i32, c: u32, a: u32) {
+        let c = self.theme_color(c);
+        self.blend_image(x, y, c, a);
+    }
+    fn blend_image(&mut self, x: i32, y: i32, c: u32, a: u32) {
         if a == 0 {
             return;
         }
@@ -163,6 +189,7 @@ impl Screen {
         }
     }
     pub fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, c: u32) {
+        let c = self.theme_color(c);
         let Clip(l, t, r, b) = self
             .clip
             .unwrap_or(Clip(0, 0, self.w as i32, self.h as i32));
@@ -398,7 +425,7 @@ impl Screen {
 
     /// Each mark uses the same 20x20 grid and two-pixel stroke.
     pub fn symbol(&mut self, x: i32, y: i32, id: usize, c: u32) {
-        for (i, a) in unsafe { SYMBOLS[id.min(13)] }.iter().enumerate() {
+        for (i, a) in unsafe { SYMBOLS[id.min(14)] }.iter().enumerate() {
             self.blend(x + (i % 20) as i32, y + (i / 20) as i32, c, *a as u32);
         }
     }
@@ -481,7 +508,7 @@ impl Screen {
             if alpha == 255 {
                 self.pixel(xx, yy, color);
             } else {
-                self.blend(xx, yy, color, alpha);
+                self.blend_image(xx, yy, color, alpha);
             }
         }
     }
@@ -548,6 +575,14 @@ impl Screen {
 
 fn symbol_paths(id: usize) -> &'static [&'static [(i32, i32)]] {
     match id {
+        13 => &[
+            &[(3, 5), (17, 5), (17, 17), (3, 17), (3, 5)],
+            &[(7, 2), (7, 7)],
+            &[(13, 2), (13, 7)],
+            &[(3, 9), (17, 9)],
+            &[(7, 13), (9, 13)],
+            &[(12, 13), (14, 13)],
+        ],
         0 => &[&[(2, 15), (2, 5), (8, 5), (10, 7), (17, 7), (17, 15), (2, 15)]],
         1 => &[
             &[(4, 2), (15, 2), (15, 17), (4, 17), (4, 2)],

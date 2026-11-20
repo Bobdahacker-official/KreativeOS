@@ -214,8 +214,18 @@ impl Input {
                 self.extended = false;
                 return None;
             }
-            if self.control && !self.extended && b == 0x26 {
-                return Some(Event::Key(0x84));
+            if self.control && !self.extended {
+                match b {
+                    0x26 => return Some(Event::Key(0x84)),
+                    0x14 => return Some(Event::Key(0xa0)),
+                    0x20 => return Some(Event::Key(0xa1)),
+                    0x39 => return Some(Event::Key(0xa2)),
+                    0x29 => return Some(Event::Key(0xaa)),
+                    0x02..=0x05 => return Some(Event::Key(0xa3 + b - 0x02)),
+                    0x2e => return Some(Event::Key(0xa7)),
+                    0x2f => return Some(Event::Key(if self.shift { 0xa9 } else { 0xa8 })),
+                    _ => {}
+                }
             }
             if b & 128 != 0 {
                 self.extended = false;

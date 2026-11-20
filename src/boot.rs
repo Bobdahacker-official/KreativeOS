@@ -165,6 +165,7 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
         stride: i.stride as usize,
         rgb: i.format == 0,
         clip: None,
+        theme: 0,
     };
     for _ in 0..4 {
         let mut size = MAP.len();

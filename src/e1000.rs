@@ -50,6 +50,17 @@ pub struct Adapter {
 }
 
 impl Adapter {
+    pub fn link_speed(&self) -> Option<u16> {
+        let status = self.reg(8);
+        if status & 2 == 0 {
+            return None;
+        }
+        Some(match (status >> 6) & 3 {
+            0 => 10,
+            1 => 100,
+            _ => 1000,
+        })
+    }
     fn reg(&self, register: usize) -> u32 {
         unsafe { ptr::read_volatile((self.registers + register) as *const u32) }
     }

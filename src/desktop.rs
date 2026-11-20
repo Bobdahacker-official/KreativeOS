@@ -11,7 +11,7 @@ const INK: u32 = 0x20363a;
 const MUTED: u32 = 0x566a69;
 const PANEL: u32 = 0xf4f5ed;
 const SURFACE: u32 = 0xe5ebe0;
-const NAMES: [&str; 13] = [
+const NAMES: [&str; 14] = [
     "Files",
     "Notes",
     "Terminal",
@@ -25,9 +25,11 @@ const NAMES: [&str; 13] = [
     "Tic Tac Toe",
     "Kreative Guide",
     "Images",
+    "Organizer",
 ];
 const GUIDE: usize = 11;
 const IMAGES: usize = 12;
+const ORGANIZER: usize = 13;
 const APP_COUNT: usize = NAMES.len();
 const BAR: i32 = 54;
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,6 +37,21 @@ enum WebJob {
     Page,
     Image,
     Audio,
+}
+struct Tab {
+    url: Text<384>,
+    page: Text<12288>,
+    picture: Option<crate::pictures::Picture>,
+    audio_url: Option<Text<384>>,
+    audio: alloc::vec::Vec<u8>,
+    download: Option<alloc::vec::Vec<u8>>,
+    scroll: usize,
+    status: &'static str,
+}
+enum SearchTarget {
+    App(usize),
+    File(Text<32>),
+    Web(alloc::boxed::Box<Text<384>>),
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +147,13 @@ struct Desktop {
     order: [usize; APP_COUNT],
     focus: usize,
     menu: bool,
+    search: Option<Text<64>>,
+    search_row: usize,
+    overview: bool,
+    theme: u8,
+    workspace: usize,
+    window_workspace: [usize; APP_COUNT],
+    clipboard: alloc::vec::Vec<Text<2048>>,
     mx: i32,
     my: i32,
     buttons: u8,
@@ -148,11 +172,29 @@ struct Desktop {
     audio_url: Option<Text<384>>,
     audio_clip: alloc::vec::Vec<u8>,
     web_status: &'static str,
+    tab: usize,
+    tabs: [Option<alloc::boxed::Box<Tab>>; 4],
+    download: Option<alloc::vec::Vec<u8>>,
+    history: alloc::vec::Vec<Text<384>>,
+    bookmarks: alloc::vec::Vec<Text<384>>,
+    web_list: u8,
     native_wifi: crate::ax210::Status,
     wifi_ssid: Text<32>,
     wifi_pass: Text<63>,
     wifi_password_field: bool,
     wifi_status: &'static str,
+    access_points: alloc::vec::Vec<crate::wifi::AccessPoint>,
+    scanning_results: bool,
+    access_point_offset: usize,
+    saved_wifi: alloc::vec::Vec<Text<384>>,
+    saved_wifi_view: bool,
+    tray: bool,
+    tray_tab: usize,
+    devices: alloc::vec::Vec<Text<80>>,
+    device_offset: usize,
+    byte_rates: (u64, u64),
+    alerts: alloc::vec::Vec<&'static str>,
+    last_link: Option<u16>,
     scroll: usize,
     calc: Text<128>,
     answer: Text<128>,
@@ -167,6 +209,7 @@ struct Desktop {
     turn: u8,
     winner: u8,
     images: Catalog,
+    organizer: crate::organizer::Organizer,
 }
 impl Desktop {
     fn new(w: usize, h: usize) -> Self {
@@ -176,6 +219,17 @@ impl Desktop {
             order: core::array::from_fn(|i| i),
             focus: 0,
             menu: false,
+            search: None,
+            search_row: 0,
+            overview: false,
+            theme: storage::find("Appearance.cfg")
+                .map(|index| unsafe { storage::FILES[index].data })
+                .and_then(|data| data.str().parse::<u8>().ok())
+                .filter(|&value| value <= 2)
+                .unwrap_or(0),
+            workspace: 0,
+            window_workspace: [0; APP_COUNT],
+            clipboard: alloc::vec::Vec::new(),
             mx: 500,
             my: 380,
             buttons: 0,
@@ -194,11 +248,29 @@ impl Desktop {
             audio_url: None,
             audio_clip: alloc::vec::Vec::new(),
             web_status: "",
+            tab: 0,
+            tabs: [None, None, None, None],
+            download: None,
+            history: read_urls("History.urls"),
+            bookmarks: read_urls("Bookmarks.urls"),
+            web_list: 0,
             native_wifi: crate::ax210::probe(),
             wifi_ssid: Text::new(),
             wifi_pass: Text::new(),
             wifi_password_field: false,
             wifi_status: "ESP-AT on COM2",
+            access_points: alloc::vec::Vec::new(),
+            scanning_results: false,
+            access_point_offset: 0,
+            saved_wifi: read_urls("WiFi.networks"),
+            saved_wifi_view: false,
+            tray: false,
+            tray_tab: 0,
+            devices: alloc::vec::Vec::new(),
+            device_offset: 0,
+            byte_rates: (0, 0),
+            alerts: alloc::vec::Vec::new(),
+            last_link: None,
             scroll: 0,
             calc: Text::new(),
             answer: Text::new(),
@@ -213,6 +285,7 @@ impl Desktop {
             turn: 1,
             winner: 0,
             images: Catalog::new(),
+            organizer: crate::organizer::Organizer::new(),
         };
         for i in 0..APP_COUNT {
             d.windows[i].w = (w as i32 - 90).min(760);
@@ -254,13 +327,23 @@ impl Desktop {
         };
         d.open(0);
         d.open(IMAGES);
-        if let Some(i) = storage::find("Guide.app") {
-            unsafe { d.package = storage::FILES[i].data }
+        if let Some(package) = crate::packages::CATALOG
+            .iter()
+            .find_map(|package| package.open())
+        {
+            d.package = package;
             d.installed = true
         }
         d
     }
     fn open(&mut self, id: usize) {
+        self.search = None;
+        if self.windows[id].open {
+            self.workspace = self.window_workspace[id];
+        } else {
+            self.window_workspace[id] = self.workspace;
+        }
+        self.tray = false;
         self.windows[id].open = true;
         self.windows[id].min = false;
         self.focus = id;
@@ -271,22 +354,209 @@ impl Desktop {
         self.order[APP_COUNT - 1] = id;
         self.menu = false
     }
+    fn visible(&self, id: usize) -> bool {
+        self.windows[id].open
+            && !self.windows[id].min
+            && self.window_workspace[id] == self.workspace
+    }
+    fn search_results(&self) -> alloc::vec::Vec<(Text<96>, SearchTarget)> {
+        let Some(query) = self.search else {
+            return alloc::vec::Vec::new();
+        };
+        let matches = |label: &str| {
+            query.len == 0
+                || label
+                    .as_bytes()
+                    .windows(query.len)
+                    .any(|part| part.eq_ignore_ascii_case(&query.bytes[..query.len]))
+        };
+        let mut rows = alloc::vec::Vec::new();
+        for (index, label) in NAMES.iter().enumerate() {
+            if self.overview && !self.windows[index].open {
+                continue;
+            }
+            if (index != GUIDE || self.installed)
+                && (matches(label)
+                    || (index == ORGANIZER && matches("calendar contacts"))
+                    || (index == 9 && matches("display input appearance settings power")))
+            {
+                let mut text = Text::new();
+                if self.overview {
+                    let _ = write!(
+                        text,
+                        "Workspace {}    {label}",
+                        self.window_workspace[index] + 1
+                    );
+                } else {
+                    let _ = write!(text, "App   {label}");
+                }
+                rows.push((text, SearchTarget::App(index)));
+            }
+        }
+        if self.overview {
+            rows.truncate(8);
+            return rows;
+        }
+        for file in unsafe { &storage::FILES } {
+            if file.used
+                && (matches(file.name.str()) || (query.len > 0 && matches(file.data.str())))
+            {
+                let mut text = Text::new();
+                let _ = write!(text, "File   {}", file.name.str());
+                rows.push((text, SearchTarget::File(file.name)));
+            }
+        }
+        for url in &self.history {
+            if matches(url.str()) {
+                let mut text = Text::new();
+                let _ = write!(text, "Web   {}", clip_label(url.str(), 280, 1));
+                rows.push((text, SearchTarget::Web(alloc::boxed::Box::new(*url))));
+            }
+        }
+        rows.truncate(8);
+        rows
+    }
+    fn search_open(&mut self, row: usize, n: &mut Network) {
+        if let Some((_, target)) = self.search_results().into_iter().nth(row) {
+            match target {
+                SearchTarget::App(id) => self.open(id),
+                SearchTarget::File(name) => self.open_file(name),
+                SearchTarget::Web(url) if n.state == 0 && !n.tls_pending => {
+                    self.url = *url;
+                    self.navigate(n);
+                    self.open(3);
+                }
+                SearchTarget::Web(_) => {}
+            }
+        }
+    }
+    fn open_file(&mut self, name: Text<32>) {
+        let Some(index) = storage::find(name.str()) else {
+            return;
+        };
+        if name.str().ends_with(".html") {
+            self.url.set("file:");
+            self.url.append(name.str());
+            self.load_local();
+            self.open(3);
+        } else {
+            self.filename = name;
+            self.note = unsafe { storage::FILES[index].data };
+            self.open(1);
+        }
+    }
+    fn alert(&mut self, event: &'static str) {
+        if self.alerts.first() != Some(&event) {
+            self.alerts.insert(0, event);
+            self.alerts.truncate(5);
+        }
+    }
     fn clear_web_media(&mut self) {
         crate::audio::stop();
         self.web_picture = None;
         self.audio_url = None;
         self.audio_clip.clear();
+        self.download = None;
         self.web_status = "";
     }
     fn navigate(&mut self, n: &mut Network) {
+        if n.state != 0 || n.tls_pending {
+            return;
+        }
+        self.web_list = 0;
         self.clear_web_media();
         self.scroll = 0;
         if self.url.str().starts_with("file:") {
             self.load_local();
+            self.record_visit();
             return;
         }
         self.page.clear();
         self.request(self.url, WebJob::Page, n);
+    }
+    fn record_visit(&mut self) {
+        if self
+            .history
+            .first()
+            .is_some_and(|url| url.str() == self.url.str())
+        {
+            return;
+        }
+        self.history.retain(|url| url.str() != self.url.str());
+        self.history.insert(0, self.url);
+        save_urls("History.urls", &mut self.history);
+    }
+    fn bookmark(&mut self) {
+        if self.url.len == 0 {
+            return;
+        }
+        if let Some(index) = self
+            .bookmarks
+            .iter()
+            .position(|url| url.str() == self.url.str())
+        {
+            self.bookmarks.remove(index);
+            self.web_status = "Bookmark removed";
+        } else {
+            self.bookmarks.insert(0, self.url);
+            self.web_status = "Bookmark added";
+        }
+        save_urls("Bookmarks.urls", &mut self.bookmarks);
+    }
+    fn switch_tab(&mut self, tab: usize, n: &Network) {
+        if tab == self.tab || n.state != 0 || n.tls_pending || n.changed {
+            return;
+        }
+        crate::audio::stop();
+        self.tabs[self.tab] = Some(alloc::boxed::Box::new(Tab {
+            url: self.url,
+            page: self.page,
+            picture: self.web_picture.take(),
+            audio_url: self.audio_url.take(),
+            audio: core::mem::take(&mut self.audio_clip),
+            download: self.download.take(),
+            scroll: self.scroll,
+            status: self.web_status,
+        }));
+        self.tab = tab;
+        self.web_list = 0;
+        if let Some(saved) = self.tabs[tab].take() {
+            self.url = saved.url;
+            self.page = saved.page;
+            self.web_picture = saved.picture;
+            self.audio_url = saved.audio_url;
+            self.audio_clip = saved.audio;
+            self.download = saved.download;
+            self.scroll = saved.scroll;
+            self.web_status = saved.status;
+        } else {
+            self.url.set("file:Readme.html");
+            self.load_local();
+        }
+    }
+    fn save_download(&mut self) {
+        let Some(data) = &self.download else {
+            self.web_status = "No downloadable response within the 2 KiB file limit";
+            return;
+        };
+        let mut name = Text::<32>::new();
+        for index in 1..=storage::COUNT {
+            name.clear();
+            let _ = write!(name, "Download-{index}");
+            if storage::find(name.str()).is_none() {
+                break;
+            }
+        }
+        self.web_status =
+            if storage::find(name.str()).is_none() && storage::put(name.str(), data).is_ok() {
+                if storage::sync() {
+                    "Download saved in Files"
+                } else {
+                    "Download available in memory"
+                }
+            } else {
+                "Could not save download: file directory full"
+            };
     }
     fn request(&mut self, url: Text<384>, job: WebJob, n: &mut Network) {
         self.resource = url;
@@ -313,6 +583,7 @@ impl Desktop {
             if n.state == 0 && !self.url.str().starts_with("file:") {
                 if self.web_job == WebJob::Page {
                     net::readable(n.body.str(), &mut self.page);
+                    self.web_status = n.status;
                 } else if !n.verified {
                     self.web_status = n.status;
                 }
@@ -331,6 +602,15 @@ impl Desktop {
             }
             self.web_status = "HTTPS redirect could not be followed";
             return;
+        }
+        if self.web_job == WebJob::Page {
+            self.record_visit();
+            self.web_status = if n.verified {
+                "HTTPS certificate verified"
+            } else {
+                n.status
+            };
+            self.download = (response.bytes.len() <= storage::CAP).then(|| response.bytes.clone());
         }
         if response.media == Media::Image && self.web_job != WebJob::Audio {
             self.web_picture = crate::pictures::decode(&response.bytes);
@@ -366,11 +646,74 @@ impl Desktop {
     }
     fn join_wifi(&mut self, n: &mut Network) {
         self.wifi_status = match n.wifi.join(self.wifi_ssid.str(), self.wifi_pass.str()) {
-            Ok(()) => "Connected. HTTPS uses Wi-Fi.",
+            Ok(()) => {
+                self.saved_wifi
+                    .retain(|name| name.str() != self.wifi_ssid.str());
+                let mut name = Text::new();
+                name.set(self.wifi_ssid.str());
+                self.saved_wifi.insert(0, name);
+                save_urls("WiFi.networks", &mut self.saved_wifi);
+                "Connected. HTTPS uses Wi-Fi."
+            }
             Err(error) => error,
         };
         self.wifi_pass.bytes.fill(0);
         self.wifi_pass.clear();
+        self.alert(self.wifi_status);
+    }
+    fn scan_wifi(&mut self, n: &mut Network) {
+        self.access_point_offset = 0;
+        self.saved_wifi_view = false;
+        self.scanning_results = true;
+        self.access_points.clear();
+        match n.wifi.scan() {
+            Ok(points) => {
+                self.wifi_status = if points.is_empty() {
+                    "No networks found"
+                } else {
+                    "Choose a network to connect"
+                };
+                self.access_points = points;
+            }
+            Err(error) => self.wifi_status = error,
+        }
+    }
+    fn view_saved_wifi(&mut self) {
+        self.access_point_offset = 0;
+        self.scanning_results = true;
+        self.saved_wifi_view = true;
+        self.access_points = self
+            .saved_wifi
+            .iter()
+            .filter(|name| name.len <= 32)
+            .map(|name| {
+                let mut ssid = Text::new();
+                ssid.set(name.str());
+                crate::wifi::AccessPoint {
+                    ssid,
+                    signal: 0,
+                    security: 0,
+                }
+            })
+            .collect();
+        self.wifi_status = if self.access_points.is_empty() {
+            "No saved networks"
+        } else {
+            "Choose a saved network and enter its password"
+        };
+    }
+    fn hotspot(&mut self, n: &mut Network, wpa3: bool) {
+        self.wifi_status =
+            match n
+                .wifi
+                .start_hotspot(self.wifi_ssid.str(), self.wifi_pass.str(), wpa3)
+            {
+                Ok(()) => "Local hotspot enabled",
+                Err(error) => error,
+            };
+        self.wifi_pass.bytes.fill(0);
+        self.wifi_pass.clear();
+        self.alert(self.wifi_status);
     }
     fn load_local(&mut self) {
         self.clear_web_media();
@@ -400,31 +743,88 @@ impl Desktop {
             },
         )
     }
-    fn package_install(&mut self) {
-        let Some(i) = storage::find("Guide.kapp") else {
-            self.notice.set("Guide.kapp was not found");
-            return;
-        };
-        let file = unsafe { storage::FILES[i].data };
-        let s = file.str();
-        if !s.starts_with("KAPP1\n") || !s.contains("\nversion=1\n") {
-            self.notice.set("Invalid KAPP1 package");
-            return;
-        }
-        let Some((_, body)) = s.split_once("\n---\n") else {
-            self.notice.set("Missing package document");
-            return;
-        };
-        self.package.set(body);
-        self.installed = true;
-        let _ = storage::put("Guide.app", body.as_bytes());
-        self.notice.set(if storage::sync() {
-            "Kreative Guide installed to disk"
+    fn package_install(&mut self, index: usize, open: bool) {
+        let package = &crate::packages::CATALOG[index];
+        let result = if open && package.open().is_some() {
+            Ok(true)
         } else {
-            "Kreative Guide installed in memory"
-        })
+            package.install()
+        };
+        match result {
+            Ok(persisted) => {
+                if let Some(document) = package.open() {
+                    self.package = document;
+                    self.installed = true;
+                    self.notice.set(if persisted {
+                        "Signed package verified and available"
+                    } else {
+                        "Signed package available in memory"
+                    });
+                    self.alert("Signed package available");
+                    if open {
+                        self.open(GUIDE);
+                    }
+                }
+            }
+            Err(error) => self.notice.set(error),
+        }
     }
     fn key(&mut self, key: u8, n: &mut Network) {
+        if key == 0xa2 || key == 0xaa {
+            self.search = if self.search.is_some() && self.overview == (key == 0xaa) {
+                None
+            } else {
+                Some(Text::new())
+            };
+            self.overview = key == 0xaa;
+            self.menu = false;
+            self.tray = false;
+            self.search_row = 0;
+            return;
+        }
+        if (0xa3..=0xa6).contains(&key) {
+            self.workspace = (key - 0xa3) as usize;
+            self.focus = self
+                .order
+                .iter()
+                .rev()
+                .copied()
+                .find(|&id| self.visible(id))
+                .unwrap_or(APP_COUNT);
+            return;
+        }
+        if self.search.is_some() {
+            match key {
+                27 => self.search = None,
+                b'\n' => self.search_open(self.search_row, n),
+                0x80 => self.search_row = self.search_row.saturating_sub(1),
+                0x81 if self.search_row + 1 < self.search_results().len() => self.search_row += 1,
+                8 | 32..=126 => {
+                    if let Some(search) = &mut self.search {
+                        if key == 8 {
+                            search.pop();
+                        } else {
+                            search.push(key);
+                        }
+                        self.search_row = 0;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.tray {
+            match key {
+                27 => self.tray = false,
+                0x82 => self.select_tray((self.tray_tab + 2) % 3),
+                0x83 => self.select_tray((self.tray_tab + 1) % 3),
+                0x80 => self.device_offset = self.device_offset.saturating_sub(1),
+                0x81 if self.device_offset + 1 < self.devices.len() => self.device_offset += 1,
+                b'\n' if self.tray_tab == 0 => self.open(8),
+                _ => {}
+            }
+            return;
+        }
         if (0x90..=0x99).contains(&key) {
             self.open((key - 0x90) as usize);
             return;
@@ -436,18 +836,38 @@ impl Desktop {
         if key == b'\t' {
             for k in 1..=APP_COUNT {
                 let id = (self.focus + k) % APP_COUNT;
-                if self.windows[id].open && !self.windows[id].min {
+                if self.visible(id) {
                     self.open(id);
                     break;
                 }
             }
             return;
         }
-        if !self.windows[self.focus].open || self.windows[self.focus].min {
+        if self.focus >= APP_COUNT || !self.visible(self.focus) {
             return;
         }
         match self.focus {
             1 => match key {
+                0xa7 if self.note.len > 0 => {
+                    self.clipboard.retain(|text| text.str() != self.note.str());
+                    self.clipboard.insert(0, self.note);
+                    self.clipboard.truncate(8);
+                    self.notice
+                        .set("Copied document. Ctrl+V pastes, Ctrl+Shift+V cycles history.");
+                }
+                0xa8 | 0xa9 => {
+                    if key == 0xa9 && !self.clipboard.is_empty() {
+                        self.clipboard.rotate_left(1);
+                    }
+                    if let Some(text) = self.clipboard.first() {
+                        if self.note.len + text.len <= self.note.bytes.len() {
+                            self.note.append(text.str());
+                            self.notice.set("Pasted from clipboard");
+                        } else {
+                            self.notice.set("Paste exceeds the document size limit");
+                        }
+                    }
+                }
                 8 => self.note.pop(),
                 b'\n' | 32..=126 => self.note.push(key),
                 _ => (),
@@ -460,6 +880,8 @@ impl Desktop {
             },
             3 => match key {
                 0x84 => self.url.clear(),
+                0xa0 => self.switch_tab((self.tab + 1) % 4, n),
+                0xa1 => self.bookmark(),
                 8 => self.url.pop(),
                 b'\n' => self.navigate(n),
                 0x80 => self.scroll = self.scroll.saturating_sub(80),
@@ -489,6 +911,15 @@ impl Desktop {
                     self.snake.next = v
                 }
             }
+            8 if self.scanning_results => match key {
+                8 => self.scanning_results = false,
+                0x80 => self.access_point_offset = self.access_point_offset.saturating_sub(1),
+                0x81 if self.access_point_offset + 1 < self.access_points.len() => {
+                    self.access_point_offset += 1
+                }
+                b'\n' => self.select_access_point(self.access_point_offset),
+                _ => {}
+            },
             8 => match key {
                 0x80 => self.wifi_password_field = false,
                 0x81 => self.wifi_password_field = true,
@@ -516,7 +947,23 @@ impl Desktop {
                 b' ' => self.images.zoom = !self.images.zoom,
                 _ => {}
             },
+            ORGANIZER => self.organizer.key(key),
             _ => (),
+        }
+    }
+    fn select_access_point(&mut self, index: usize) {
+        if let Some(point) = self.access_points.get(index) {
+            self.wifi_ssid = point.ssid;
+            self.wifi_pass.bytes.fill(0);
+            self.wifi_pass.clear();
+            self.wifi_password_field = true;
+            self.scanning_results = false;
+        }
+    }
+    fn select_tray(&mut self, tab: usize) {
+        self.tray_tab = tab;
+        if tab == 1 && self.devices.is_empty() {
+            self.devices = crate::devices::inventory();
         }
     }
     fn step_image(&mut self, direction: isize) {
@@ -542,21 +989,20 @@ impl Desktop {
         }
     }
     fn execute(&mut self, n: &mut Network) {
+        let command = self.command;
+        self.command.clear();
+        self.execute_line(command.str(), n, true);
+    }
+    fn execute_line(&mut self, line: &str, n: &mut Network, allow_script: bool) {
         if self.terminal.len > 3000 {
             self.terminal.clear()
         }
-        let cmd = self.command;
-        self.command.clear();
         self.terminal.append("\n> ");
-        self.terminal.append(cmd.str());
+        self.terminal.append(line);
         self.terminal.push(b'\n');
-        let (verb, arg) = cmd
-            .str()
-            .trim()
-            .split_once(' ')
-            .unwrap_or((cmd.str().trim(), ""));
+        let (verb, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
         match verb{
- "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ninstall Guide.kapp | reboot\n"),
+ "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nrun NAME | sdk | install NAME.kapp | reboot\n"),
  "ls"=>unsafe{for f in &storage::FILES{if f.used{let _=writeln!(self.terminal,"{}  {} bytes",f.name.str(),f.data.len);}}},
  "cat"=>{if let Some(i)=storage::find(arg){unsafe{self.terminal.append(storage::FILES[i].data.str())}}else{self.terminal.append("File not found")}},
  "touch"=>{match storage::put(arg,b""){Ok(())=>{self.terminal.append(if storage::sync(){"Created on disk"}else{"Created in memory"})},Err(e)=>self.terminal.append(e)}},
@@ -565,10 +1011,27 @@ impl Desktop {
  "save"=>{self.save();self.terminal.append(self.notice.str())},"clear"=>self.terminal.clear(),
  "open"=>{if let Some(i)=NAMES.iter().position(|s|s.eq_ignore_ascii_case(arg)){self.open(i)}else{self.terminal.append("Unknown app")}},
  "browse"=>{self.url.set(arg);self.navigate(n);self.open(3)},
- "net"=>{let _=write!(self.terminal,"{}\nIP 10.0.2.15/24  Gateway 10.0.2.2\nDNS 10.0.2.3\nRX {} TX {}\n",n.status,n.received,n.sent);},
+ "net"=>{ ethernet_details(&mut self.terminal, n); },
+ "dhcp"=>{let vlan = if arg.is_empty() { Some(0) } else { arg.parse().ok() };
+   self.terminal.append(if vlan.is_some_and(|tag| n.start_dhcp(tag)) { "DHCP discovery started" } else { "Use dhcp [VLAN] with idle Ethernet" });},
+ "static"=>{let mut p = arg.split_ascii_whitespace(); let parsed = (|| {
+   let config = crate::dhcp::Config { ip: crate::dhcp::address(p.next()?)?, mask: crate::dhcp::address(p.next()?)?,
+       router: crate::dhcp::address(p.next()?)?, dns: crate::dhcp::address(p.next()?)? };
+   let vlan = p.next().unwrap_or("0").parse().ok()?;
+   p.next().is_none().then_some((config,vlan)) })();
+   self.terminal.append(if parsed.is_some_and(|(config,vlan)| n.static_config(config,vlan)) { "Static IPv4 applied" } else { "Use static IP MASK ROUTER DNS [VLAN] with idle Ethernet" });},
  "uptime"=>{let _=write!(self.terminal,"{} seconds",hardware::millis()/1000);},
  "calc"=>{self.calc.set(arg);self.calculate();self.terminal.append(self.answer.str())},
- "install"=>{if arg=="Guide.kapp"{self.package_install();self.terminal.append(self.notice.str())}else{self.terminal.append("Package not found: use Guide.kapp")}},
+ "install"=>{if let Some(index) = crate::packages::CATALOG.iter().position(|p| p.source == arg) { self.package_install(index, false); self.terminal.append(self.notice.str()); } else { self.terminal.append("Package is not in the signed catalog"); }},
+ "sdk"=>self.package_install(1, true),
+ "run" if allow_script => {
+   if let Some(index) = storage::find(arg) {
+       let script = unsafe { storage::FILES[index].data };
+       let commands = script.str().lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#'));
+       for command in commands.take(32) { self.execute_line(command, n, false); }
+   } else { self.terminal.append("Script was not found"); }
+ },
+ "run"=>self.terminal.append("Nested scripts are unavailable"),
  "reboot"=>hardware::reboot(),""=>(),_=>self.terminal.append("Unknown command. Type help.")}
     }
     fn pointer_hover(&self, w: i32, h: i32) -> Option<(usize, i32)> {
@@ -580,7 +1043,7 @@ impl Desktop {
         }
         for &id in self.order.iter().rev() {
             let win = self.windows[id];
-            if win.open && !win.min && win.inside(self.mx, self.my) {
+            if self.visible(id) && win.inside(self.mx, self.my) {
                 if self.my < win.y + 38 && self.mx >= win.x + win.w - 114 {
                     return Some((id, (self.mx - (win.x + win.w - 114)) / 38));
                 }
@@ -592,7 +1055,7 @@ impl Desktop {
     fn mouse(&mut self, dx: i32, dy: i32, buttons: u8, wheel: i32, s: &Screen, n: &mut Network) {
         self.mx = (self.mx + dx).clamp(0, s.w as i32 - 1);
         self.my = (self.my + dy).clamp(0, s.h as i32 - 1);
-        if wheel != 0 {
+        if wheel != 0 && self.focus < APP_COUNT && self.visible(self.focus) {
             let focused = self.windows[self.focus];
             if focused.open && !focused.min && focused.inside(self.mx, self.my) {
                 match self.focus {
@@ -611,6 +1074,20 @@ impl Desktop {
         let click = buttons & 1 != 0 && self.buttons & 1 == 0;
         self.buttons = buttons;
         if buttons & 1 == 0 {
+            if let Some((id, _, _)) = self.drag {
+                let width = s.w as i32;
+                let left = self.mx < 12;
+                if left || self.mx >= width - 12 {
+                    let window = &mut self.windows[id];
+                    if self.restore[id].is_none() {
+                        self.restore[id] = Some(*window);
+                    }
+                    window.w = width / 2;
+                    window.x = if left { 0 } else { width - window.w };
+                    window.y = 0;
+                    window.h = s.h as i32 - BAR;
+                }
+            }
             self.drag = None;
             self.last_paint = None;
             self.painting = false;
@@ -624,8 +1101,21 @@ impl Desktop {
         if click {
             let x = self.mx;
             let y = self.my;
+            if self.search.is_some() {
+                let left = s.w as i32 / 2 - 236;
+                if (left..left + 472).contains(&x) && (131..371).contains(&y) {
+                    self.search_open(((y - 131) / 30) as usize, n);
+                } else if y < 68 || y >= 389 || x < left || x >= left + 472 {
+                    self.search = None;
+                }
+                return;
+            }
             if y >= s.h as i32 - BAR {
-                if x < 118 {
+                if x >= s.w as i32 - 89 {
+                    self.tray = !self.tray;
+                    self.menu = false;
+                } else if x < 118 {
+                    self.tray = false;
                     self.menu = !self.menu;
                 } else {
                     let step = task_width(s.w as i32);
@@ -643,9 +1133,46 @@ impl Desktop {
                 }
                 return;
             }
+            if self.tray {
+                let left = s.w as i32 - 406;
+                let top = s.h as i32 - BAR - 304;
+                if (left..left + 394).contains(&x) && (top..top + 292).contains(&y) {
+                    let px = x - left;
+                    let py = y - top;
+                    if (12..36).contains(&py) && (12..372).contains(&px) {
+                        self.select_tray(((px - 12) / 120) as usize);
+                    } else if self.tray_tab == 0 && (211..247).contains(&py) {
+                        if px < 132 {
+                            self.open(8);
+                        } else if px < 252 {
+                            self.notice.set(if n.start_dhcp(n.vlan) {
+                                "DHCP discovery started"
+                            } else {
+                                "Ethernet is unavailable or busy"
+                            });
+                        } else {
+                            crate::audio::volume(-4);
+                        }
+                    } else if self.tray_tab == 0 && (250..282).contains(&py) && px >= 252 {
+                        crate::audio::volume(4);
+                    } else if self.tray_tab == 1 && py >= 250 {
+                        if px < 140 {
+                            self.device_offset = self.device_offset.saturating_sub(8);
+                        } else if px < 260 && self.device_offset + 8 < self.devices.len() {
+                            self.device_offset += 8;
+                        } else if px >= 260 {
+                            self.devices = crate::devices::inventory();
+                            self.device_offset = 0;
+                        }
+                    }
+                    return;
+                }
+                self.tray = false;
+                return;
+            }
             if self.menu {
                 let top = s.h as i32 - BAR - 406;
-                if (18..414).contains(&x) && y >= top + 58 && y < top + 378 {
+                if (18..414).contains(&x) && y >= top + 58 && y < top + 394 {
                     let row = ((y - top - 58) / 48) as usize;
                     let column = ((x - 18) / 198) as usize;
                     let id = row * 2 + column;
@@ -660,7 +1187,7 @@ impl Desktop {
             for j in (0..APP_COUNT).rev() {
                 let id = self.order[j];
                 let w = self.windows[id];
-                if !w.open || w.min || !w.inside(x, y) {
+                if !self.visible(id) || !w.inside(x, y) {
                     continue;
                 }
                 self.open(id);
@@ -718,6 +1245,7 @@ impl Desktop {
     }
     fn app_click(&mut self, id: usize, x: i32, y: i32, n: &mut Network) {
         match id {
+            ORGANIZER => self.organizer.click(x, y),
             0 => {
                 if y >= 128 && x >= 154 {
                     let row = ((y - 128) / 42) as usize;
@@ -730,17 +1258,7 @@ impl Desktop {
                             .map(|(i, _)| i)
                     };
                     if let Some(i) = found {
-                        let f = unsafe { storage::FILES[i] };
-                        if f.name.str().ends_with(".html") {
-                            self.url.set("file:");
-                            self.url.append(f.name.str());
-                            self.load_local();
-                            self.open(3)
-                        } else {
-                            self.filename = f.name;
-                            self.note = f.data;
-                            self.open(1)
-                        }
+                        self.open_file(unsafe { storage::FILES[i].name });
                     }
                 }
             }
@@ -757,7 +1275,25 @@ impl Desktop {
             }
             3 => {
                 let w = self.windows[id];
-                if (48..84).contains(&y) && x > w.w - 90 {
+                if (88..113).contains(&y) && x >= 14 && x < w.w - 14 {
+                    match ((x - 14) * 7 / (w.w - 28)) as usize {
+                        tab @ 0..=3 => self.switch_tab(tab, n),
+                        4 => self.bookmark(),
+                        5 => self.web_list = (self.web_list + 1) % 3,
+                        6 => self.save_download(),
+                        _ => {}
+                    }
+                } else if self.web_list != 0 && (148..w.h - 48).contains(&y) && x >= 14 {
+                    let list = if self.web_list == 1 {
+                        &self.bookmarks
+                    } else {
+                        &self.history
+                    };
+                    if let Some(url) = list.get(((y - 148) / 23) as usize).copied() {
+                        self.url = url;
+                        self.navigate(n);
+                    }
+                } else if (48..84).contains(&y) && x > w.w - 90 {
                     self.navigate(n);
                 } else if (48..84).contains(&y) && x >= 14 && x < w.w - 108 {
                     self.url.clear();
@@ -802,19 +1338,47 @@ impl Desktop {
                 }
             }
             7 => {
-                if y >= 130 && y < 190 {
-                    self.package_install()
-                } else if y >= 200 && y < 260 && self.installed {
-                    self.open(11)
+                if (138..246).contains(&y) && (24..340).contains(&x) {
+                    self.package_install(((y - 138) / 54) as usize, true);
                 }
             }
             8 => {
-                if (177..212).contains(&y) {
+                if self.scanning_results {
+                    if (48..84).contains(&y) && x < 150 {
+                        self.scanning_results = false;
+                    } else if (48..84).contains(&y) && x < 275 {
+                        self.scan_wifi(n);
+                    } else if y >= 127 && x >= 24 {
+                        self.select_access_point(
+                            self.access_point_offset + ((y - 127) / 29) as usize,
+                        );
+                    }
+                } else if (48..84).contains(&y) && x >= self.windows[8].w - 145 {
+                    self.scan_wifi(n);
+                } else if (177..212).contains(&y) {
                     self.wifi_password_field = false;
                 } else if (247..282).contains(&y) {
                     self.wifi_password_field = true;
                 } else if (295..336).contains(&y) {
-                    self.join_wifi(n);
+                    if x < 138 {
+                        self.join_wifi(n);
+                    } else if (148..258).contains(&x) {
+                        self.view_saved_wifi();
+                    } else if (268..378).contains(&x) {
+                        self.wifi_status = n
+                            .wifi
+                            .disconnect()
+                            .map(|()| "Wi-Fi disconnected")
+                            .unwrap_or_else(|error| error);
+                        self.alert(self.wifi_status);
+                    }
+                } else if (378..413).contains(&y) {
+                    if (24..155).contains(&x) {
+                        self.hotspot(n, false);
+                    }
+                    if (165..296).contains(&x) {
+                        self.hotspot(n, true);
+                    }
                 }
             }
             9 => {
@@ -825,6 +1389,12 @@ impl Desktop {
                         0x5655a0
                     } else {
                         0xa75a35
+                    }
+                } else if (178..213).contains(&y) && (24..404).contains(&x) {
+                    self.theme = ((x - 24) / 128) as u8;
+                    let value = [b'0' + self.theme];
+                    if storage::put("Appearance.cfg", &value).is_ok() {
+                        storage::sync();
                     }
                 } else if y >= 220 && y < 270 {
                     self.notice.set(if storage::sync() {
@@ -886,12 +1456,23 @@ impl Desktop {
     fn draw(&self, s: &mut Screen, n: &Network) {
         let w = s.w as i32;
         let h = s.h as i32;
-        s.wallpaper();
-        s.symbol(28, 25, APP_COUNT, 0x9dd7bb);
+        if self.workspace == 0 {
+            s.wallpaper();
+        } else {
+            s.rect(
+                0,
+                0,
+                w,
+                h,
+                [0, 0x253c52, 0x3b2d49, 0x3a4130][self.workspace],
+            );
+        }
+        s.theme = self.theme;
+        s.symbol(28, 25, 14, 0x9dd7bb);
         s.text(56, 22, "KreativeOS", 0xe2eee5, 3);
         for &id in &self.order {
             let window = self.windows[id];
-            if window.open && !window.min {
+            if self.visible(id) {
                 self.window(s, n, id, window);
             }
         }
@@ -908,12 +1489,12 @@ impl Desktop {
             if self.menu { 0x568978 } else { 0x284b4b },
             255,
         );
-        s.symbol(22, bar_y + 16, APP_COUNT, 0xe4f5ea);
+        s.symbol(22, bar_y + 16, 14, 0xe4f5ea);
         s.centered(41, bar_y + 8, 68, 38, "Apps", 0xe4f5ea, 1);
         let step = task_width(w);
         for (slot, id) in self.task_ids().enumerate() {
             let left = 124 + slot as i32 * step;
-            let selected = self.focus == id && self.windows[id].open && !self.windows[id].min;
+            let selected = self.focus == id && self.visible(id);
             let hover = (left..left + step).contains(&self.mx) && self.my >= bar_y;
             if selected || hover {
                 s.rounded(left + 2, bar_y + 7, step - 4, 40, 5, 0x315552, 255);
@@ -960,6 +1541,32 @@ impl Desktop {
             0x9ab9ad,
             1,
         );
+        if self.tray {
+            self.draw_tray(s, n, w - 406, bar_y - 304);
+        }
+        if let Some(query) = self.search {
+            let left = w / 2 - 236;
+            s.shadow(left, 68, 472, 321);
+            s.rounded(left, 68, 472, 321, 9, PANEL, 255);
+            s.rounded(left + 12, 80, 448, 39, 6, 0xffffff, 255);
+            let label = if query.len == 0 {
+                if self.overview {
+                    "Find an open window"
+                } else {
+                    "Search apps, files and browser history"
+                }
+            } else {
+                query.str()
+            };
+            s.text(left + 24, 92, clip_label(label, 420, 1), INK, 1);
+            for (row, (label, _)) in self.search_results().iter().enumerate() {
+                let top = 131 + row as i32 * 30;
+                if self.search_row == row {
+                    s.rounded(left + 12, top, 448, 27, 5, 0xc4dfcf, 255);
+                }
+                s.text(left + 24, top + 4, clip_label(label.str(), 420, 1), INK, 1);
+            }
+        }
 
         if self.menu {
             let top = bar_y - 406;
@@ -985,6 +1592,114 @@ impl Desktop {
                 );
                 s.symbol(left + 15, row + 14, id, 0x246455);
                 s.centered(left + 43, row + 3, 139, 42, label, INK, 1);
+            }
+        }
+        s.theme = 0;
+    }
+    fn draw_tray(&self, s: &mut Screen, n: &Network, x: i32, y: i32) {
+        s.shadow(x, y, 394, 292);
+        s.rounded(x, y, 394, 292, 9, PANEL, 255);
+        for (index, label) in ["Controls", "Devices", "Activity"].iter().enumerate() {
+            let left = x + 12 + index as i32 * 120;
+            s.rounded(
+                left,
+                y + 12,
+                112,
+                24,
+                5,
+                if self.tray_tab == index {
+                    0xc4dfcf
+                } else {
+                    SURFACE
+                },
+                255,
+            );
+            s.centered(left, y + 12, 112, 24, label, INK, 1);
+        }
+        match self.tray_tab {
+            0 => {
+                let mut details = Text::<300>::new();
+                ethernet_details(&mut details, n);
+                s.wrapped(x + 16, y + 50, 360, 132, details.str(), INK);
+                let mut sound = Text::<72>::new();
+                if let Some(volume) = crate::audio::volume(0) {
+                    let _ = write!(sound, "Sound volume: {}%", volume);
+                } else {
+                    sound.set("No supported sound device");
+                }
+                s.text(x + 16, y + 181, sound.str(), MUTED, 1);
+                for (index, label) in ["Wi-Fi", "DHCP", "Volume -"].iter().enumerate() {
+                    button(
+                        s,
+                        x + 12 + index as i32 * 120,
+                        y + 211,
+                        112,
+                        label,
+                        self.accent,
+                    );
+                }
+                button(s, x + 252, y + 250, 112, "Volume +", self.accent);
+                s.text(
+                    x + 16,
+                    y + 261,
+                    clip_label(self.notice.str(), 225, 1),
+                    MUTED,
+                    1,
+                );
+            }
+            1 => {
+                for (row, device) in self
+                    .devices
+                    .iter()
+                    .skip(self.device_offset)
+                    .take(8)
+                    .enumerate()
+                {
+                    s.text(
+                        x + 16,
+                        y + 51 + row as i32 * 24,
+                        clip_label(device.str(), 360, 1),
+                        INK,
+                        1,
+                    );
+                }
+                for (index, label) in ["Previous", "Next", "Rescan"].iter().enumerate() {
+                    button(
+                        s,
+                        x + 12 + index as i32 * 120,
+                        y + 250,
+                        112,
+                        label,
+                        self.accent,
+                    );
+                }
+            }
+            _ => {
+                let mut activity = Text::<512>::new();
+                let (used, capacity) = crate::memory::usage();
+                let _ = writeln!(
+                    activity,
+                    "Uptime: {} s   Display: {} x {}\nNetwork: {} / {} bytes per second\nHeap: {} / {} KiB",
+                    hardware::millis() / 1000,
+                    s.w,
+                    s.h,
+                    self.byte_rates.0,
+                    self.byte_rates.1,
+                    used / 1024,
+                    capacity / 1024
+                );
+                let _ = writeln!(
+                    activity,
+                    "Storage: {} / {} local files\n{}\n{}",
+                    unsafe { storage::FILES.iter().filter(|file| file.used).count() },
+                    storage::COUNT,
+                    n.status,
+                    self.notice.str()
+                );
+                for event in self.alerts.iter().take(4) {
+                    let _ = writeln!(activity, "{}", event);
+                }
+                s.wrapped(x + 16, y + 52, 360, 220, activity.str(), INK);
             }
         }
     }
@@ -1045,6 +1760,7 @@ impl Desktop {
         }
         let clip = s.clip_rect(x + 1, y + 38, w - 2, h - 39);
         match id {
+            ORGANIZER => self.organizer.draw(s, x, y, w, self.accent),
             0 => {
                 s.rect(x + 1, y + 39, 142, h - 54, 0xe7ede2);
                 s.text(x + 18, y + 59, "Locations", MUTED, 1);
@@ -1135,35 +1851,80 @@ impl Desktop {
                     1,
                 );
                 button(s, x + w - 86, y + 48, 72, "Go", self.accent);
-                s.rect(x + 14, y + 95, w - 28, h - 143, 0xffffff);
+                for (slot, label) in ["1", "2", "3", "4", "Save link", "Library", "Download"]
+                    .iter()
+                    .enumerate()
+                {
+                    let left = x + 14 + (slot as i32 * (w - 28) + 6) / 7;
+                    let right = x + 14 + ((slot + 1) as i32 * (w - 28) + 6) / 7;
+                    s.rounded(
+                        left,
+                        y + 88,
+                        right - left - 3,
+                        24,
+                        4,
+                        if self.tab == slot { 0xc4dfcf } else { SURFACE },
+                        255,
+                    );
+                    s.centered(
+                        left,
+                        y + 88,
+                        right - left - 3,
+                        24,
+                        clip_label(label, right - left - 6, 1),
+                        INK,
+                        1,
+                    );
+                }
+                s.rect(x + 14, y + 119, w - 28, h - 167, 0xffffff);
                 let image_height = if self.web_picture.is_some() {
                     if self.page.len == 0 {
-                        h - 158
+                        h - 182
                     } else {
                         (h / 2).max(72)
                     }
                 } else {
                     0
                 };
-                if let Some(image) = &self.web_picture {
-                    s.image(x + 26, y + 101, w - 52, image_height, image, false);
+                if self.web_list != 0 {
+                    let (label, list) = if self.web_list == 1 {
+                        ("Bookmarks", &self.bookmarks)
+                    } else {
+                        ("History", &self.history)
+                    };
+                    s.text(x + 24, y + 125, label, INK, 1);
+                    for (row, url) in list
+                        .iter()
+                        .take(((h - 196) / 23).max(0) as usize)
+                        .enumerate()
+                    {
+                        s.text(
+                            x + 24,
+                            y + 150 + row as i32 * 23,
+                            clip_label(url.str(), w - 48, 1),
+                            self.accent,
+                            1,
+                        );
+                    }
+                } else if let Some(image) = &self.web_picture {
+                    s.image(x + 26, y + 125, w - 52, image_height, image, false);
                 }
-                if self.page.len > 0 {
+                if self.web_list == 0 && self.page.len > 0 {
                     let start = self.scroll.min(self.page.len);
                     s.wrapped(
                         x + 26,
-                        y + 108 + image_height,
+                        y + 132 + image_height,
                         w - 52,
-                        (h - 165 - image_height).max(0),
+                        (h - 189 - image_height).max(0),
                         &self.page.str()[start..],
                         INK,
                     );
                 }
                 let can_play = self.audio_url.is_some() || !self.audio_clip.is_empty();
-                let status = if self.url.str().starts_with("file:") {
-                    "Local document"
-                } else if !self.web_status.is_empty() {
+                let status = if !self.web_status.is_empty() {
                     self.web_status
+                } else if self.url.str().starts_with("file:") {
+                    "Local document"
                 } else {
                     n.status
                 };
@@ -1262,14 +2023,69 @@ impl Desktop {
                     "Install document apps from the local disk.",
                     MUTED,
                 );
-                button(s, x + 24, y + 138, 300, "INSTALL GUIDE.KAPP", self.accent);
-                if self.installed {
-                    button(s, x + 24, y + 210, 300, "OPEN KREATIVE GUIDE", SURFACE)
+                for (index, package) in crate::packages::CATALOG.iter().enumerate() {
+                    let mut label = Text::<80>::new();
+                    let _ = write!(label, "{}  /  v1  /  Signed", package.name);
+                    button(
+                        s,
+                        x + 24,
+                        y + 138 + index as i32 * 54,
+                        316,
+                        label.str(),
+                        self.accent,
+                    );
                 }
                 s.wrapped(x + 24, y + 285, w - 48, 100, self.notice.str(), INK);
             }
             8 => {
+                if self.scanning_results {
+                    button(s, x + 24, y + 48, 112, "Back", SURFACE);
+                    button(s, x + 150, y + 48, 112, "Scan again", self.accent);
+                    s.text(x + 24, y + 95, self.wifi_status, MUTED, 1);
+                    let rows = ((h - 128) / 29).max(0) as usize;
+                    for (row, point) in self
+                        .access_points
+                        .iter()
+                        .skip(self.access_point_offset)
+                        .take(rows)
+                        .enumerate()
+                    {
+                        let yy = y + 127 + row as i32 * 29;
+                        let mut label = Text::<96>::new();
+                        let security = match point.security {
+                            0 => "Open",
+                            3 => "WPA2",
+                            6 => "WPA3",
+                            7 => "WPA2/WPA3",
+                            _ => "Secured",
+                        };
+                        if self.saved_wifi_view {
+                            label.set(point.ssid.str());
+                        } else {
+                            let _ = write!(
+                                label,
+                                "{}   {} dBm   {}",
+                                point.ssid.str(),
+                                point.signal,
+                                security
+                            );
+                        }
+                        s.rounded(
+                            x + 24,
+                            yy,
+                            w - 48,
+                            26,
+                            5,
+                            if row == 0 { 0xc4dfcf } else { SURFACE },
+                            255,
+                        );
+                        s.text(x + 34, yy + 5, clip_label(label.str(), w - 68, 1), INK, 1);
+                    }
+                    s.clip = clip;
+                    return;
+                }
                 s.text(x + 24, y + 58, "Network", INK, 3);
+                button(s, x + w - 145, y + 48, 120, "Scan Wi-Fi", self.accent);
                 let mut status: Text<128> = Text::new();
                 let _ = write!(
                     status,
@@ -1318,13 +2134,17 @@ impl Desktop {
                 }
                 s.text(x + 35, y + 255, hidden.str(), INK, 1);
                 button(s, x + 24, y + 295, 112, "Connect", self.accent);
+                button(s, x + 148, y + 295, 110, "Saved", SURFACE);
+                button(s, x + 268, y + 295, 110, "Disconnect", SURFACE);
                 s.text(
-                    x + 150,
-                    y + 303,
-                    clip_label(self.wifi_status, w - 170, 1),
+                    x + 24,
+                    y + 335,
+                    clip_label(self.wifi_status, w - 48, 1),
                     MUTED,
                     1,
                 );
+                button(s, x + 24, y + 378, 131, "WPA2 hotspot", SURFACE);
+                button(s, x + 165, y + 378, 131, "WPA3 hotspot", SURFACE);
                 let mut native = Text::new();
                 self.native_wifi.describe(&mut native);
                 s.text(
@@ -1340,6 +2160,20 @@ impl Desktop {
                 button(s, x + 24, y + 120, 150, "Jade", 0x1d6c58);
                 button(s, x + 220, y + 120, 150, "Iris", 0x5655a0);
                 button(s, x + 420, y + 120, 150, "Copper", 0xa75a35);
+                for (index, label) in ["Light", "Dark", "Contrast"].iter().enumerate() {
+                    button(
+                        s,
+                        x + 24 + index as i32 * 128,
+                        y + 178,
+                        120,
+                        label,
+                        if self.theme == index as u8 {
+                            self.accent
+                        } else {
+                            SURFACE
+                        },
+                    );
+                }
                 button(s, x + 24, y + 228, 280, "SAVE ALL FILES", SURFACE);
                 button(s, x + 24, y + 308, 280, "RESTART COMPUTER", SURFACE);
                 s.text(x + 24, y + h - 40, self.notice.str(), self.accent, 1);
@@ -1441,7 +2275,64 @@ fn task_width(width: i32) -> i32 {
     ((width - 216) / APP_COUNT as i32).clamp(28, 58)
 }
 
-fn clip_label(label: &str, width: i32, size: i32) -> &str {
+fn ethernet_details(out: &mut impl Write, n: &Network) {
+    let dotted = |a: [u8; 4]| {
+        let mut label = Text::<16>::new();
+        let _ = write!(label, "{}.{}.{}.{}", a[0], a[1], a[2], a[3]);
+        label
+    };
+    let _ = write!(out, "Ethernet: {}  ", n.adapter_name());
+    if let Some(speed) = n.link_speed() {
+        let _ = writeln!(out, "{} Mbps", speed);
+    } else {
+        let _ = writeln!(out, "Link down");
+    }
+    let _ = writeln!(
+        out,
+        "{}  |  VLAN {}\nIPv4 {} / {}\nRouter {}   DNS {}\nRX {}  TX {}",
+        n.ethernet_status,
+        n.vlan,
+        dotted(n.config.ip).str(),
+        dotted(n.config.mask).str(),
+        dotted(n.config.router).str(),
+        dotted(n.config.dns).str(),
+        n.received,
+        n.sent
+    );
+}
+
+fn read_urls(name: &str) -> alloc::vec::Vec<Text<384>> {
+    let Some(index) = storage::find(name) else {
+        return alloc::vec::Vec::new();
+    };
+    let data = unsafe { storage::FILES[index].data };
+    data.str()
+        .lines()
+        .take(24)
+        .filter(|line| line.len() <= 384 && !line.is_empty())
+        .map(|line| {
+            let mut url = Text::new();
+            url.set(line);
+            url
+        })
+        .collect()
+}
+
+fn save_urls(name: &str, urls: &mut alloc::vec::Vec<Text<384>>) {
+    urls.truncate(24);
+    while urls.iter().map(|url| url.len + 1).sum::<usize>() > storage::CAP {
+        urls.pop();
+    }
+    let mut data = Text::<{ storage::CAP }>::new();
+    for url in urls {
+        let _ = writeln!(data, "{}", url.str());
+    }
+    if storage::put(name, &data.bytes[..data.len]).is_ok() {
+        storage::sync();
+    }
+}
+
+pub(crate) fn clip_label(label: &str, width: i32, size: i32) -> &str {
     let mut end = label.len();
     while end > 0 && crate::graphics::text_width(&label[..end], size) > width {
         end = label[..end]
@@ -1507,6 +2398,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
     let mut dirty = false;
     let mut last = 0;
     let mut clock = 0;
+    let mut previous_bytes = (0, 0);
     desktop.draw(&mut s, &network);
     s.present();
     let mut shown = (desktop.mx, desktop.my);
@@ -1550,15 +2442,29 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
             desktop.receive_web(&mut network);
             dirty = true
         }
-        if desktop.windows[6].open
-            && !desktop.windows[6].min
-            && hardware::millis() - desktop.snake.at >= 140
-        {
+        if desktop.visible(6) && hardware::millis() - desktop.snake.at >= 140 {
             desktop.snake.step();
             dirty = true
         }
         if hardware::millis() / 1000 != clock {
-            clock = hardware::millis() / 1000;
+            let now = hardware::millis() / 1000;
+            let elapsed = (now - clock).max(1);
+            let bytes = (network.received_bytes, network.sent_bytes);
+            desktop.byte_rates = (
+                (bytes.0 - previous_bytes.0) / elapsed,
+                (bytes.1 - previous_bytes.1) / elapsed,
+            );
+            previous_bytes = bytes;
+            let link = network.link_speed();
+            if link != desktop.last_link {
+                desktop.alert(if link.is_some() {
+                    "Ethernet link connected"
+                } else {
+                    "Ethernet link disconnected"
+                });
+                desktop.last_link = link;
+            }
+            clock = now;
             dirty = true
         }
         if dirty && hardware::millis() - last >= 16 {

@@ -1,0 +1,22 @@
+KAPP1
+name=Kreative SDK
+version=1
+---
+KreativeOS Shell SDK
+
+Scripts are local text files, with one shell command per line. Empty lines and lines starting with # are ignored. Run a script with: run NAME
+
+Example
+# Inspect the system without changing it
+net
+uptime
+ls
+calc (8 + 4) * 2
+
+Commands receive one argument string. Use help to list commands. The run command skips nested scripts and limits execution to 32 commands.
+
+Desktop shortcuts
+Ctrl+Space: search apps, files and browser history
+Ctrl+1 through Ctrl+4: change workspace
+Ctrl+T: switch browser tabs
+Ctrl+D: toggle the current bookmark
