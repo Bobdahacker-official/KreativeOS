@@ -31,12 +31,13 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 
 ## Desktop
 
-- Antialiased Open Sans, layered gradient wallpaper, rounded windows, a translucent dock, and a grid launcher. Windows support dragging, minimizing, maximizing and closing.
-- PS/2 keyboard and three-byte PS/2 mouse packets.
+- Antialiased Open Sans, a jade grid wallpaper, a full-width taskbar, and a two-column app launcher. Windows support dragging, minimizing, maximizing and closing.
+- PS/2 keyboard, standard PS/2 mice, and IntelliMouse-compatible scroll wheels.
 - Files and Notes with a persistent, checksummed, two-snapshot KFS volume.
 - Terminal with file operations, app launching, network status, calculation and reboot.
 - HTTP and HTTPS browser with DNS resolution, TCP requests, HTML-to-text rendering, local HTML documents and scrolling.
 - Calculator with checked integer arithmetic, operator precedence and parentheses.
+- Images opens PNG, JPEG and uncompressed BMP at fit or actual size. The gallery imports packs from the boot disk and firmware-mounted USB storage.
 - Paint with a color palette, continuous strokes and clear canvas.
 - Snake with food, scoring, self-collision, wall collision and restart.
 - Two-player Tic Tac Toe with turn management, win detection and restart.
@@ -44,15 +45,27 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 - Network status with real Ethernet counters, MAC address and PCI Wi-Fi device discovery.
 - Settings with three accent colors, save-all and restart.
 
-F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. The red, yellow and green buttons close, minimize and maximize or restore it. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
+F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
 
 ## Networking and hardware
 
-The supplied configuration uses QEMU user networking: IPv4 `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`. The Ethernet driver targets PCI RTL8139 with 32-bit DMA allocations. The stack implements Ethernet, ARP, IPv4 validation, UDP DNS lookup and a single bounded TCP/HTTP connection with retransmission and timeout handling.
+The supplied configuration uses QEMU user networking: IPv4 `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`. Ethernet supports PCI RTL8139 and Intel PRO/1000 MT Desktop (82540EM). QEMU defaults to RTL8139. Set `NIC_MODEL=e1000` to select the Intel adapter. The stack implements Ethernet, ARP, IPv4 validation, UDP DNS lookup and a single bounded TCP/HTTP connection with retransmission and timeout handling.
 
 Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. Browser output is text, capped at 12 KiB. HTTP uses port 80 and HTTP/1.0 connection-close semantics. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. JavaScript, CSS layout, DHCP and Wi-Fi radio association are not implemented. Wi-Fi devices are counted through PCI discovery; the Network app reports driver availability accurately.
 
 The kernel is a single-address-space system with a cooperative app event loop and polled drivers. It currently uses firmware-established CPU mappings. USB input, audio, process isolation, SMP and general-purpose native executable loading are not implemented. Paint content stays in memory. KAPP packages contain document apps, not native machine code.
+
+## Import your images
+
+Copy PNG, JPEG or uncompressed BMP files into an `imports/` directory at the repository root and rebuild the boot image. On boot, open **Images** from the taskbar. Use the arrow keys or mouse wheel to browse, and press Space to switch between fit and actual size.
+
+To import from USB, create a pack with the included script and put `IMAGES.KIP` in the root of a FAT-formatted USB drive. Connect the drive before boot.
+
+```sh
+python3 scripts/pack_images.py photo.jpg drawing.png
+```
+
+The gallery reads up to 36 imported images from packs totaling 6 MiB. Each image can be up to 4,096 pixels on either side, with a total of 2,621,440 pixels.
 
 ## Files and packages
 

@@ -22,3 +22,5 @@ Source map:
 | `desktop.rs` | Window manager, apps, package installation |
 | `text.rs` | Fixed-capacity strings |
 | `scripts/image.py` | FAT16 boot image creation |
+
+The image gallery loads bounded image packs using UEFI Simple File System before the kernel exits boot services. The native renderer shows PNG, JPEG and BMP in fit and actual-size modes. The Intel 82540EM path uses memory-mapped registers and separate polled RX and TX descriptor rings. Both Ethernet drivers share the same TCP and TLS code.

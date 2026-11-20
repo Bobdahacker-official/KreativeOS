@@ -1,7 +1,7 @@
 # Desktop design
 
-The desktop uses a layered gradient wallpaper, a translucent system strip and dock, and softly shadowed windows. Original icons keep the main tools one click away, and hovering shows each label. Window controls live on the left, with title-bar dragging and a separate grid launcher.
+The desktop uses jade and graphite, a full-width taskbar and a two-column launcher. App marks share a 20-pixel grid and two-pixel strokes. The same vector mark appears in the taskbar, launcher and window title bar. Window controls are on the right, and the active title bar has a jade underline.
 
-The renderer draws into a RAM framebuffer. It composites rounded surfaces, shadows and text with alpha blending. Open Sans is rasterized into a compressed grayscale glyph atlas at four sizes. Its license is in [assets/OpenSans-LICENSE.txt](../assets/OpenSans-LICENSE.txt).
+The renderer draws into a RAM framebuffer. Fonts come from Open Sans, rasterized into a compressed grayscale glyph atlas at four sizes. Button labels and window titles use the visible glyph bounds for centering. The font license is in [assets/OpenSans-LICENSE.txt](../assets/OpenSans-LICENSE.txt).
 
-The palette, app marks and wallpaper are drawn by KreativeOS. Firmware graphics access follows the [UEFI Graphics Output Protocol](https://uefi.org/specs/UEFI/2.10/12_Protocols_Console_Support.html).
+KreativeOS draws its own app marks and wallpaper. Firmware graphics access follows the [UEFI Graphics Output Protocol](https://uefi.org/specs/UEFI/2.10/12_Protocols_Console_Support.html).

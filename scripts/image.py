@@ -2,6 +2,7 @@
 """Build a partitioned FAT16 UEFI boot image without third-party tooling."""
 from pathlib import Path
 import struct, os
+from pack_images import pack
 ROOT = Path(__file__).resolve().parent.parent
 out = ROOT / os.environ.get('KREATIVE_BUILD_DIR', 'build')
 loader = (out / 'esp/EFI/BOOT/BOOTX64.EFI').read_bytes()
@@ -70,6 +71,13 @@ for cl, parent, entries in [(efi, 0, [entry('BOOT', 16, bootdir)]),
     image[pos:pos+len(directory)] = directory
 root_pos = base + (reserved + 2 * fat_sectors) * sector
 image[root_pos:root_pos+32] = entry('EFI', 16, efi)
+imports = ROOT / os.environ.get('KREATIVE_IMPORT_DIR', 'imports')
+if imports.is_dir():
+    paths = [p for p in sorted(imports.iterdir()) if p.is_file() and p.suffix.lower() in {'.png', '.jpg', '.jpeg', '.bmp'}]
+    if paths:
+        pictures = pack(paths)
+        picture_cluster = allocate(pictures)
+        image[root_pos+32:root_pos+64] = entry('IMAGES  KIP', 32, picture_cluster, len(pictures))
 for i in range(2):
     pos = base + (reserved + i * fat_sectors) * sector
     image[pos:pos+len(fat)] = fat

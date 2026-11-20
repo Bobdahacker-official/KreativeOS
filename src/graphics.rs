@@ -1,10 +1,27 @@
 use alloc::vec::Vec;
 static mut FONT: Vec<u8> = Vec::new();
+static mut INK_BOUNDS: [(i32, i32, i32, i32); 380] = [(0, 0, 0, 0); 380];
 static mut WALLPAPER: Vec<u32> = Vec::new();
 pub fn init() {
     unsafe {
         FONT = miniz_oxide::inflate::decompress_to_vec_zlib(include_bytes!("../assets/ui-font.z"))
             .expect("Font atlas");
+        for glyph in 0..380 {
+            let (mut left, mut top, mut right, mut bottom) = (40, 48, 0, 0);
+            for row in 0..48 {
+                for col in 0..40 {
+                    if FONT[glyph * 1921 + 1 + row * 40 + col] != 0 {
+                        left = left.min(col as i32);
+                        top = top.min(row as i32);
+                        right = right.max(col as i32 + 1);
+                        bottom = bottom.max(row as i32 + 1);
+                    }
+                }
+            }
+            if right > left {
+                INK_BOUNDS[glyph] = (left, top, right, bottom);
+            }
+        }
     }
 }
 pub struct Screen {
@@ -60,13 +77,6 @@ impl Screen {
             }
         }
     }
-    pub fn tint(&mut self, x: i32, y: i32, w: i32, h: i32, c: u32, a: u32) {
-        for yy in y.max(0)..(y + h).min(self.h as i32) {
-            for xx in x.max(0)..(x + w).min(self.w as i32) {
-                self.blend(xx, yy, c, a)
-            }
-        }
-    }
     pub fn line(&mut self, mut x: i32, mut y: i32, x1: i32, y1: i32, c: u32) {
         let dx = (x1 - x).abs();
         let sx = if x < x1 { 1 } else { -1 };
@@ -86,22 +96,6 @@ impl Screen {
             if e2 <= dx {
                 e += dx;
                 y += sy
-            }
-        }
-    }
-    pub fn circle(&mut self, x: i32, y: i32, r: i32, c: u32) {
-        for yy in -r..=r {
-            for xx in -r..=r {
-                let d = xx * xx + yy * yy;
-                let edge = r * r - d;
-                if edge >= 0 {
-                    self.blend(
-                        x + xx,
-                        y + yy,
-                        c,
-                        ((edge * 255) / (2 * r).max(1)).min(255) as u32,
-                    )
-                }
             }
         }
     }
@@ -197,6 +191,35 @@ impl Screen {
             }
         }
     }
+    pub fn centered(&mut self, x: i32, y: i32, w: i32, h: i32, label: &str, color: u32, size: i32) {
+        let mut cursor = 0;
+        let (mut left, mut top, mut right, mut bottom) = (i32::MAX, i32::MAX, 0, 0);
+        for byte in label.bytes() {
+            let ch = if (32..127).contains(&byte) {
+                byte
+            } else {
+                b'?'
+            };
+            let (l, t, r, b) = unsafe { INK_BOUNDS[font_index(size) * 95 + (ch - 32) as usize] };
+            if r > l {
+                left = left.min(cursor + l);
+                top = top.min(t);
+                right = right.max(cursor + r);
+                bottom = bottom.max(b);
+            }
+            cursor += advance(ch, size);
+        }
+        if right > left && bottom > top {
+            self.text(
+                x + (w - (right - left)) / 2 - left,
+                y + (h - (bottom - top)) / 2 - top,
+                label,
+                color,
+                size,
+            );
+        }
+    }
+
     pub fn wallpaper(&mut self) {
         unsafe {
             if WALLPAPER.len() != self.w * self.h {
@@ -205,19 +228,20 @@ impl Screen {
                     for x in 0..self.w {
                         let fx = x as f32 / self.w as f32;
                         let fy = y as f32 / self.h as f32;
-                        let mut c = mix(0x304c9e, 0xb9b7ed, (fy * 255.) as u32);
-                        let glow = libm::expf(
-                            -((fx - 0.88) * (fx - 0.88) * 3.5 + (fy - 0.08) * (fy - 0.08) * 3.0),
-                        );
-                        c = mix(c, 0xffd7b5, (glow * 240.) as u32);
-                        let wave = 0.55 + 0.22 * libm::sinf(fx * 4.5 - 0.8);
-                        let dist = fy - wave;
-                        let ridge = libm::expf(-dist * dist * 110.);
-                        c = mix(c, 0xe5c8ed, (ridge * 150.) as u32);
-                        let fold = libm::expf(-(dist + 0.075) * (dist + 0.075) * 90.);
-                        c = mix(c, 0x5b66ac, (fold * 110.) as u32);
-                        let lower = (fy - 0.55 + fx * 0.3).clamp(0., 1.);
-                        c = mix(c, 0x283c79, (lower * 170.) as u32);
+                        let glow =
+                            (1.0 - ((fx - 0.77).abs() * 0.6 + (fy - 0.67).abs())).clamp(0., 1.);
+                        let sweep = (fx * 0.73 - fy * 0.68) + 0.16;
+                        let mut c = mix(0x14252c, 0x2b5352, (255. * glow * glow) as u32);
+                        if (0.20..0.40).contains(&sweep) {
+                            c = mix(c, 0x518071, 75);
+                        }
+                        if (0.405..0.418).contains(&sweep) {
+                            c = mix(c, 0x83a791, 84);
+                        }
+                        let grid = x % 32 == 0 && y % 32 == 0;
+                        if grid {
+                            c = mix(c, 0xa4c4b3, 48);
+                        }
                         WALLPAPER[y * self.w + x] = c;
                     }
                 }
@@ -225,88 +249,150 @@ impl Screen {
             core::ptr::copy_nonoverlapping(WALLPAPER.as_ptr(), self.back, WALLPAPER.len());
         }
     }
-    pub fn icon(&mut self, x: i32, y: i32, id: usize, size: i32) {
-        let colors = [
-            0x3c9ce9, 0xe9ba42, 0x343b50, 0x529ce9, 0xec945d, 0xd28cdb, 0x59b98b, 0xba91df,
-            0x69b7c3, 0x8d99b0, 0xe792a4, 0x8279d8,
-        ];
-        let c = colors[id % 12];
-        self.rounded(x, y, size, size, 12, c, 255);
-        self.rounded(x + 1, y + 1, size - 2, size / 2, 11, 0xffffff, 28);
-        let mid = x + size / 2;
-        let cy = y + size / 2;
-        let white = 0xfaffff;
-        match id {
-            0 => {
-                self.rounded(x + 8, y + 14, size - 16, size - 23, 4, white, 235);
-                self.rounded(x + 8, y + 10, size / 2 - 3, 10, 3, white, 235);
-            }
-            1 => {
-                self.rounded(x + 10, y + 8, size - 20, size - 16, 3, white, 255);
-                for k in 0..3 {
-                    self.rect(x + 15, y + 17 + k * 6, size - 30, 2, 0xcfb471)
-                }
-            }
-            2 => self.text(x + 9, y + 10, ">_", white, 3),
-            3 => {
-                self.circle(mid, cy, size / 2 - 7, white);
-                self.circle(mid, cy, size / 2 - 10, 0x69b9f3);
-                self.line(mid - 7, cy + 9, mid + 7, cy - 9, 0xe95b69);
-                self.line(mid - 6, cy + 9, mid + 8, cy - 9, 0xe95b69);
-            }
-            4 => {
-                self.rect(x + 10, y + 9, size - 20, 8, white);
-                for yy in 0..2 {
-                    for xx in 0..3 {
-                        self.rounded(x + 10 + xx * 9, y + 23 + yy * 9, 6, 6, 2, white, 255)
-                    }
-                }
-            }
-            5 => {
-                self.circle(mid, cy, 15, white);
-                for (dx, dy, color) in [
-                    (-5, -6, 0x76a9e4),
-                    (6, -5, 0xea8585),
-                    (-7, 5, 0x80c39c),
-                    (6, 6, 0xeac464),
-                ] {
-                    self.circle(mid + dx, cy + dy, 4, color)
-                }
-            }
-            6 => {
-                for i in 0..3 {
-                    self.rounded(x + 10 + i * 9, y + 19, 11, 12, 4, white, 255)
-                }
-                self.circle(x + 33, y + 21, 2, 0x45946f)
-            }
-            7 => {
-                self.rounded(x + 10, y + 12, size - 20, size - 22, 3, white, 230);
-                self.rect(mid - 2, y + 12, 4, size - 22, 0xb88fd9);
-                self.line(x + 10, y + 12, mid, y + 7, white);
-                self.line(mid, y + 7, x + size - 10, y + 12, white)
-            }
-            8 => {
-                for i in 0..3 {
-                    self.rounded(
-                        x + 9 + i * 10,
-                        y + size - 14 - i * 8,
-                        7,
-                        6 + i * 8,
-                        2,
-                        white,
-                        255,
-                    )
-                }
-            }
-            9 => {
-                self.circle(mid, cy, 15, white);
-                self.circle(mid, cy, 8, 0x8d99b0);
-                self.circle(mid, cy, 3, white)
-            }
-            10 => self.text(x + 8, y + 8, "xo", white, 3),
-            _ => self.text(x + 14, y + 8, "K", white, 3),
+
+    pub fn stroke(&mut self, x: i32, y: i32, a: (i32, i32), b: (i32, i32), c: u32) {
+        let (ax, ay) = (x + a.0, y + a.1);
+        let (bx, by) = (x + b.0, y + b.1);
+        self.line(ax, ay, bx, by, c);
+        if (bx - ax).abs() >= (by - ay).abs() {
+            self.line(ax, ay + 1, bx, by + 1, c);
+        } else {
+            self.line(ax + 1, ay, bx + 1, by, c);
         }
     }
+
+    /// Each mark uses the same 20x20 grid and two-pixel stroke.
+    pub fn symbol(&mut self, x: i32, y: i32, id: usize, c: u32) {
+        let paths: &[&[(i32, i32)]] = match id {
+            0 => &[&[(2, 15), (2, 5), (8, 5), (10, 7), (17, 7), (17, 15), (2, 15)]],
+            1 => &[
+                &[(4, 2), (15, 2), (15, 17), (4, 17), (4, 2)],
+                &[(7, 6), (12, 6)],
+                &[(7, 10), (12, 10)],
+                &[(7, 14), (10, 14)],
+            ],
+            2 => &[&[(3, 5), (7, 9), (3, 13)], &[(10, 14), (16, 14)]],
+            3 => &[
+                &[
+                    (5, 3),
+                    (14, 3),
+                    (17, 6),
+                    (17, 13),
+                    (14, 16),
+                    (5, 16),
+                    (2, 13),
+                    (2, 6),
+                    (5, 3),
+                ],
+                &[(3, 9), (16, 9)],
+                &[(10, 3), (7, 9), (10, 16), (13, 9), (10, 3)],
+            ],
+            4 => &[
+                &[(3, 2), (16, 2), (16, 17), (3, 17), (3, 2)],
+                &[(6, 6), (13, 6)],
+                &[(6, 10), (7, 10)],
+                &[(11, 10), (12, 10)],
+                &[(6, 14), (7, 14)],
+                &[(11, 14), (12, 14)],
+            ],
+            5 => &[
+                &[(4, 13), (13, 3), (16, 6), (7, 16), (3, 17), (4, 13)],
+                &[(4, 13), (7, 16)],
+                &[(11, 5), (14, 8)],
+            ],
+            6 => &[
+                &[(3, 14), (3, 7), (8, 7), (8, 13), (13, 13), (13, 5), (17, 5)],
+                &[(15, 3), (17, 5), (15, 7)],
+            ],
+            7 => &[
+                &[
+                    (3, 6),
+                    (10, 3),
+                    (16, 6),
+                    (16, 14),
+                    (10, 17),
+                    (3, 14),
+                    (3, 6),
+                ],
+                &[(3, 6), (10, 9), (16, 6)],
+                &[(10, 9), (10, 17)],
+            ],
+            8 => &[
+                &[(3, 16), (3, 12)],
+                &[(9, 16), (9, 8)],
+                &[(15, 16), (15, 3)],
+            ],
+            9 => &[
+                &[(3, 5), (16, 5)],
+                &[(3, 10), (16, 10)],
+                &[(3, 15), (16, 15)],
+                &[(7, 3), (7, 7)],
+                &[(12, 8), (12, 12)],
+                &[(6, 13), (6, 17)],
+            ],
+            10 => &[
+                &[(7, 3), (7, 16)],
+                &[(12, 3), (12, 16)],
+                &[(3, 7), (16, 7)],
+                &[(3, 12), (16, 12)],
+            ],
+            11 => &[
+                &[
+                    (2, 4),
+                    (8, 4),
+                    (10, 6),
+                    (12, 4),
+                    (17, 4),
+                    (17, 15),
+                    (12, 15),
+                    (10, 17),
+                    (8, 15),
+                    (2, 15),
+                    (2, 4),
+                ],
+                &[(10, 6), (10, 16)],
+            ],
+            12 => &[
+                &[(2, 3), (17, 3), (17, 16), (2, 16), (2, 3)],
+                &[(3, 13), (7, 9), (11, 13), (14, 10), (16, 12)],
+                &[(12, 7), (13, 7)],
+            ],
+            _ => &[&[(4, 3), (4, 16)], &[(14, 3), (5, 10), (15, 16)]],
+        };
+        for path in paths {
+            for points in path.windows(2) {
+                self.stroke(x, y, points[0], points[1], c);
+            }
+        }
+    }
+
+    pub fn image(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        picture: &crate::pictures::Picture,
+        zoom: bool,
+    ) {
+        let (pw, ph) = (picture.width as i32, picture.height as i32);
+        let (width, height) = if zoom {
+            (pw, ph)
+        } else if pw * h > ph * w {
+            (w, (w * ph / pw).max(1))
+        } else {
+            ((h * pw / ph).max(1), h)
+        };
+        let (left, top) = (x + (w - width) / 2, y + (h - height) / 2);
+        for yy in y.max(top)..(y + h).min(top + height) {
+            let row = (yy - top) * ph / height;
+            for xx in x.max(left)..(x + w).min(left + width) {
+                let col = (xx - left) * pw / width;
+                self.pixel(xx, yy, picture.pixels[(row * pw + col) as usize]);
+            }
+        }
+    }
+
     pub fn cursor(&mut self, x: i32, y: i32) {
         for yy in 0..24 {
             for xx in 0..17 {

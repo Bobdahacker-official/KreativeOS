@@ -37,6 +37,7 @@ for port,name in [(8443,'trusted'),(8444,'wrong-host'),(8445,'untrusted')]:
  server.socket=ctx.wrap_socket(server.socket,server_side=True)
  threading.Thread(target=server.serve_forever,daemon=True).start();servers.append(server)
 env=dict(os.environ,BOOT_IMAGE='build/tls-smoke/KreativeOS.img',SERIAL_LOG='build/tls-check.log')
+(ROOT/'build/tls-check.log').unlink(missing_ok=True)
 p=subprocess.Popen(['bash','scripts/run.sh','-display','none','-no-reboot'],cwd=ROOT,env=env)
 try:
  deadline=time.monotonic()+90

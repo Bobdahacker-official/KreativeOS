@@ -4,10 +4,12 @@
 extern crate alloc;
 mod boot;
 mod desktop;
+mod e1000;
 mod graphics;
 mod hardware;
 mod memory;
 mod net;
+mod pictures;
 mod secure;
 mod storage;
 mod text;

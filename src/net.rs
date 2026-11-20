@@ -31,7 +31,8 @@ fn fold(mut s: u32) -> u16 {
     !(s as u16)
 }
 pub struct Network {
-    pub io: u16,
+    io: u16,
+    intel: Option<crate::e1000::Adapter>,
     pub mac: [u8; 6],
     pub received: u64,
     pub sent: u64,
@@ -67,11 +68,12 @@ impl Network {
     pub unsafe fn new() -> Self {
         let mut n = Self {
             io: 0,
+            intel: None,
             mac: [0; 6],
             received: 0,
             sent: 0,
             wifi_devices: 0,
-            status: "No RTL8139 Ethernet adapter",
+            status: "No supported Ethernet adapter",
             body: Text::new(),
             changed: true,
             rx: 0,
@@ -98,6 +100,7 @@ impl Network {
             last: [0; 1536],
             last_len: 0,
         };
+        let mut intel_slot = None;
         for bus in 0..=255 {
             for slot in 0..32 {
                 for func in 0..8 {
@@ -108,6 +111,9 @@ impl Network {
                     let class = pci(bus, slot, func, 8);
                     if class >> 16 == 0x0280 {
                         n.wifi_devices += 1
+                    }
+                    if id == 0x100e8086 && intel_slot.is_none() {
+                        intel_slot = Some((bus, slot, func));
                     }
                     if id == 0x813910ec && n.io == 0 {
                         let bar = pci(bus, slot, func, 0x10);
@@ -122,6 +128,14 @@ impl Network {
             }
         }
         if n.io == 0 {
+            if let Some((bus, slot, func)) = intel_slot {
+                if let Some(adapter) = crate::e1000::Adapter::init(bus, slot, func, DMA) {
+                    n.mac = adapter.mac;
+                    n.intel = Some(adapter);
+                    n.status = "Ethernet ready: 10.0.2.15";
+                    log(b"KreativeOS: Intel 82540EM ready\r\n");
+                }
+            }
             return n;
         }
         let p = n.io;
@@ -150,8 +164,26 @@ impl Network {
         log(b"KreativeOS: RTL8139 ready\r\n");
         n
     }
+    pub fn adapter_name(&self) -> &'static str {
+        if self.intel.is_some() {
+            "Intel 82540EM"
+        } else if self.io != 0 {
+            "RTL8139"
+        } else {
+            "None"
+        }
+    }
+    pub fn online(&self) -> bool {
+        self.io != 0 || self.intel.is_some()
+    }
     fn transmit(&mut self, frame: &[u8]) {
-        if self.io == 0 || frame.len() > 1536 {
+        if !self.online() || frame.len() > 1536 {
+            return;
+        }
+        if let Some(adapter) = &mut self.intel {
+            if adapter.transmit(frame) {
+                self.sent += 1;
+            }
             return;
         }
         unsafe {
@@ -283,7 +315,7 @@ impl Network {
         self.changed = true;
         self.have_gateway = false;
         self.last_len = 0;
-        if self.io == 0 {
+        if !self.online() {
             self.fail("No Ethernet adapter");
             return;
         }
@@ -350,39 +382,46 @@ impl Network {
         self.arp(false, [0; 6], GATE)
     }
     pub fn poll(&mut self) {
-        if self.io == 0 {
+        if !self.online() {
             return;
         }
         for _ in 0..16 {
             let mut f = [0u8; 1536];
-            let len = unsafe {
-                if in8(self.io + 0x37) & 1 != 0 {
+            let len = if let Some(adapter) = &mut self.intel {
+                let Some(len) = adapter.receive(&mut f) else {
                     break;
-                }
-                let p = (DMA + self.rx) as *const u8;
-                let status = core::ptr::read_volatile(p as *const u16);
-                let len = core::ptr::read_volatile(p.add(2) as *const u16) as usize;
-                if len < 4 || len > 1522 {
-                    out8(self.io + 0x37, 4);
-                    self.rx = 0;
-                    out32(self.io + 0x30, DMA as u32);
-                    out16(self.io + 0x38, 0xfff0);
-                    out8(self.io + 0x37, 12);
-                    break;
-                }
-                if status & 1 != 0 {
-                    for i in 0..len - 4 {
-                        f[i] = core::ptr::read_volatile((DMA + self.rx + 4 + i) as *const u8)
+                };
+                len
+            } else {
+                unsafe {
+                    if in8(self.io + 0x37) & 1 != 0 {
+                        break;
                     }
+                    let p = (DMA + self.rx) as *const u8;
+                    let status = core::ptr::read_volatile(p as *const u16);
+                    let len = core::ptr::read_volatile(p.add(2) as *const u16) as usize;
+                    if len < 4 || len > 1522 {
+                        out8(self.io + 0x37, 4);
+                        self.rx = 0;
+                        out32(self.io + 0x30, DMA as u32);
+                        out16(self.io + 0x38, 0xfff0);
+                        out8(self.io + 0x37, 12);
+                        break;
+                    }
+                    if status & 1 != 0 {
+                        for i in 0..len - 4 {
+                            f[i] = core::ptr::read_volatile((DMA + self.rx + 4 + i) as *const u8)
+                        }
+                    }
+                    self.rx = (self.rx + len + 4 + 3) & !3;
+                    self.rx %= 8192;
+                    out16(self.io + 0x38, (self.rx as u16).wrapping_sub(16));
+                    out16(self.io + 0x3e, 0xffff);
+                    if status & 1 == 0 {
+                        continue;
+                    }
+                    len - 4
                 }
-                self.rx = (self.rx + len + 4 + 3) & !3;
-                self.rx %= 8192;
-                out16(self.io + 0x38, (self.rx as u16).wrapping_sub(16));
-                out16(self.io + 0x3e, 0xffff);
-                if status & 1 == 0 {
-                    continue;
-                }
-                len - 4
             };
             self.received += 1;
             self.frame(&f[..len]);

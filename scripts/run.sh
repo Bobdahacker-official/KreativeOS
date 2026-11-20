@@ -7,7 +7,8 @@ if [ ! -f build/OVMF_VARS.fd ]; then cp "$OVMF_VARS" build/OVMF_VARS.fd; fi
 exec qemu-system-x86_64 -machine pc -cpu max -m 256 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
-  -drive if=virtio,format=raw,file="${BOOT_IMAGE:-build/KreativeOS.img}" \
+  -drive if=none,id=kos,format=raw,file="${BOOT_IMAGE:-build/KreativeOS.img}" \
+  -device virtio-blk-pci,drive=kos,bootindex=1 \
   -drive if=ide,index=0,format=raw,file=build/KreativeOS-data.img \
-  -device rtl8139,netdev=net0 -netdev user,id=net0 \
+  -device "${NIC_MODEL:-rtl8139},netdev=net0" -netdev user,id=net0 \
   -vga std -serial "file:${SERIAL_LOG:-build/serial.log}" "$@"

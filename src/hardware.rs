@@ -66,16 +66,24 @@ unsafe fn data(c: u8) {
     wait_write();
     out8(0x60, c)
 }
-unsafe fn mouse(c: u8) {
-    cmd(0xd4);
-    data(c);
+static mut MOUSE_BYTES: usize = 3;
+
+unsafe fn mouse_reply() -> Option<u8> {
     for _ in 0..100000 {
-        if in8(0x64) & 1 != 0 {
-            let _ = in8(0x60);
-            break;
+        let status = in8(0x64);
+        if status & 0x21 == 0x21 {
+            return Some(in8(0x60));
         }
     }
+    None
 }
+
+unsafe fn mouse(command: u8) -> bool {
+    cmd(0xd4);
+    data(command);
+    mouse_reply() == Some(0xfa)
+}
+
 pub unsafe fn init() {
     out8(0x21, 255);
     out8(0xa1, 255);
@@ -117,16 +125,25 @@ pub unsafe fn init() {
     data((config | 0x40) & !0x33);
     cmd(0xae);
     mouse(0xf6);
+    let wheel = [200, 100, 80]
+        .into_iter()
+        .all(|rate| mouse(0xf3) && mouse(rate))
+        && mouse(0xf2)
+        && mouse_reply() == Some(3);
+    if wheel {
+        MOUSE_BYTES = 4;
+        log(b"KreativeOS: PS/2 wheel enabled\r\n");
+    }
     mouse(0xf4);
     log(b"KreativeOS: input ready\r\n");
 }
 #[derive(Clone, Copy)]
 pub enum Event {
     Key(u8),
-    Mouse(i32, i32, u8),
+    Mouse(i32, i32, u8, i32),
 }
 pub struct Input {
-    packet: [u8; 3],
+    packet: [u8; 4],
     pos: usize,
     shift: bool,
     control: bool,
@@ -135,7 +152,7 @@ pub struct Input {
 impl Input {
     pub fn new() -> Self {
         Self {
-            packet: [0; 3],
+            packet: [0; 4],
             pos: 0,
             shift: false,
             control: false,
@@ -155,14 +172,19 @@ impl Input {
                 }
                 self.packet[self.pos] = b;
                 self.pos += 1;
-                if self.pos == 3 {
+                if self.pos == MOUSE_BYTES {
                     self.pos = 0;
                     if self.packet[0] & 0xc0 != 0 {
                         return None;
                     }
                     let dx = self.packet[1] as i32 - if self.packet[0] & 16 != 0 { 256 } else { 0 };
                     let dy = self.packet[2] as i32 - if self.packet[0] & 32 != 0 { 256 } else { 0 };
-                    return Some(Event::Mouse(dx, -dy, self.packet[0] & 7));
+                    let wheel = if MOUSE_BYTES == 4 {
+                        -(((self.packet[3] << 4) as i8 >> 4) as i32)
+                    } else {
+                        0
+                    };
+                    return Some(Event::Mouse(dx, -dy, self.packet[0] & 7, wheel));
                 }
                 return None;
             }

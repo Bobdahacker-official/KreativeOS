@@ -45,7 +45,7 @@ struct BootServices {
     install: usize,
     reinstall: usize,
     uninstall: usize,
-    handle: usize,
+    handle: unsafe extern "efiapi" fn(usize, *const Guid, *mut *mut c_void) -> usize,
     reserved: usize,
     register: usize,
     locate_handle: usize,
@@ -59,13 +59,19 @@ struct BootServices {
     monotonic: usize,
     stall: usize,
     watchdog: unsafe extern "efiapi" fn(usize, u64, usize, *const u16) -> usize,
-    connect: usize,
+    connect: unsafe extern "efiapi" fn(usize, *mut usize, *mut c_void, u8) -> usize,
     disconnect: usize,
     open: usize,
     close: usize,
     open_info: usize,
     protocols: usize,
-    locate_buffer: usize,
+    locate_buffer: unsafe extern "efiapi" fn(
+        u32,
+        *const Guid,
+        *mut c_void,
+        *mut usize,
+        *mut *mut usize,
+    ) -> usize,
     locate: unsafe extern "efiapi" fn(*const Guid, *mut c_void, *mut *mut c_void) -> usize,
 }
 #[repr(C)]
@@ -139,10 +145,12 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
     }
     // DMA buffers are explicitly allocated below 4GiB for the RTL8139 controller.
     let mut dma = 0xffff_ffffu64;
-    if (bs.allocate_pages)(1, 2, 8, &mut dma) != 0 {
+    if (bs.allocate_pages)(1, 2, 40, &mut dma) != 0 {
         return None;
     }
     crate::net::DMA = dma as usize;
+    connect_usb_storage(bs, free);
+    load_pictures(bs, free);
     let screen = Screen {
         front: m.base as *mut u32,
         back: back as *mut u32,
@@ -172,4 +180,119 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
         }
     }
     None
+}
+
+#[repr(C)]
+struct SimpleFileSystem {
+    revision: u64,
+    open_volume: unsafe extern "efiapi" fn(*mut Self, *mut *mut EfiFile) -> usize,
+}
+
+#[repr(C)]
+struct EfiFile {
+    revision: u64,
+    open: unsafe extern "efiapi" fn(*mut Self, *mut *mut Self, *const u16, u64, u64) -> usize,
+    close: unsafe extern "efiapi" fn(*mut Self) -> usize,
+    delete: usize,
+    read: unsafe extern "efiapi" fn(*mut Self, *mut usize, *mut u8) -> usize,
+}
+
+#[repr(C)]
+struct PciIo {
+    poll: [usize; 2],
+    memory: [usize; 2],
+    io: [usize; 2],
+    config_read: unsafe extern "efiapi" fn(*mut Self, u32, u32, usize, *mut u32) -> usize,
+}
+
+unsafe fn connect_usb_storage(
+    bs: &BootServices,
+    free: unsafe extern "efiapi" fn(*mut c_void) -> usize,
+) {
+    let pci_io_guid = Guid(
+        0x4cf5b200,
+        0x68b8,
+        0x4ca5,
+        [0x9e, 0xec, 0xb2, 0x3e, 0x3f, 0x50, 0x02, 0x9a],
+    );
+    let mut count = 0;
+    let mut handles = core::ptr::null_mut();
+    if (bs.locate_buffer)(
+        2,
+        &pci_io_guid,
+        core::ptr::null_mut(),
+        &mut count,
+        &mut handles,
+    ) != 0
+    {
+        return;
+    }
+    for index in 0..count.min(512) {
+        let handle = *handles.add(index);
+        let mut protocol = core::ptr::null_mut();
+        if (bs.handle)(handle, &pci_io_guid, &mut protocol) != 0 {
+            continue;
+        }
+        let pci = protocol.cast::<PciIo>();
+        let mut class = 0u32;
+        if ((*pci).config_read)(pci, 2, 8, 1, &mut class) == 0 && class >> 16 == 0x0c03 {
+            (bs.connect)(handle, core::ptr::null_mut(), core::ptr::null_mut(), 1);
+        }
+    }
+    free(handles.cast());
+}
+
+unsafe fn load_pictures(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut c_void) -> usize) {
+    use crate::pictures::{BOOT_IMAGES, IMPORT_LIMIT, VOLUMES};
+    let guid = Guid(
+        0x964e5b22,
+        0x6459,
+        0x11d2,
+        [0x8e, 0x39, 0, 0xa0, 0xc9, 0x69, 0x72, 0x3b],
+    );
+    let filename = [92u16, 73, 77, 65, 71, 69, 83, 46, 75, 73, 80, 0];
+    let mut count = 0;
+    let mut handles = core::ptr::null_mut();
+    if (bs.locate_buffer)(2, &guid, core::ptr::null_mut(), &mut count, &mut handles) != 0 {
+        return;
+    }
+    let mut offset = 0;
+    let mut imported = 0;
+    for i in 0..count.min(128) {
+        let mut protocol = core::ptr::null_mut();
+        if (bs.handle)(*handles.add(i), &guid, &mut protocol) != 0 {
+            continue;
+        }
+        let fs = protocol.cast::<SimpleFileSystem>();
+        let mut root = core::ptr::null_mut();
+        if ((*fs).open_volume)(fs, &mut root) != 0 {
+            continue;
+        }
+        let mut file = core::ptr::null_mut();
+        let status = ((*root).open)(root, &mut file, filename.as_ptr(), 1, 0);
+        if status == 0 {
+            let mut length = IMPORT_LIMIT - offset;
+            let status = ((*file).read)(file, &mut length, BOOT_IMAGES.as_mut_ptr().add(offset));
+            let mut extra = 1;
+            let mut tail = 0;
+            let end = ((*file).read)(file, &mut extra, &mut tail);
+            ((*file).close)(file);
+            if status == 0
+                && end == 0
+                && extra == 0
+                && length >= 4
+                && length <= IMPORT_LIMIT - offset
+                && &BOOT_IMAGES[offset..offset + 4] == b"KIP1"
+            {
+                VOLUMES[imported] = (offset, length);
+                offset += length;
+                imported += 1;
+            }
+        }
+        ((*root).close)(root);
+        if imported == VOLUMES.len() || offset >= IMPORT_LIMIT - 4 {
+            break;
+        }
+    }
+    free(handles.cast());
 }

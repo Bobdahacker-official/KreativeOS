@@ -23,8 +23,8 @@ jobs:
           sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/kreative-apt.list" -o Dir::Etc::sourceparts=- -o Acquire::https::Timeout=20 install -y --no-install-recommends qemu-system-x86 ovmf
       - name: Boot once and capture desktop
         run: python3 scripts/smoke.py
-      - name: Verify HTTPS and certificate rejection
-        run: python3 scripts/tls_check.py
+      - name: Verify HTTPS over Intel Ethernet and certificate rejection
+        run: NIC_MODEL=e1000 python3 scripts/tls_check.py
       - name: Upload boot image and build evidence
         if: always()
         uses: actions/upload-artifact@v4
