@@ -155,6 +155,7 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
     }
     connect_usb_storage(bs, free);
     load_pictures(bs, free);
+    prepare_ax210_dma(bs);
     inspect_ax210(bs, free);
     let screen = Screen {
         front: m.base as *mut u32,
@@ -212,6 +213,26 @@ struct PciIo {
     mem_write: BarAccess,
     io: [usize; 2],
     config_read: unsafe extern "efiapi" fn(*mut Self, u32, u32, usize, *mut u32) -> usize,
+}
+
+unsafe fn prepare_ax210_dma(bs: &BootServices) {
+    use crate::{ax210, ax_dma};
+    if ax210::staged_firmware().is_none() {
+        return;
+    }
+    let mut address = 0xffff_ffffu64;
+    let pages = ax_dma::ARENA_SIZE / 4096;
+    if (bs.allocate_pages)(1, 2, pages, &mut address) != 0 {
+        return;
+    }
+    let arena = core::slice::from_raw_parts_mut(address as *mut u8, ax_dma::ARENA_SIZE);
+    let bytes = &ax210::FIRMWARE[..ax210::FIRMWARE_LEN];
+    ax_dma::BOOTSTRAP = ax_dma::prepare(bytes, arena, address);
+    if ax_dma::BOOTSTRAP.is_none() {
+        let free: unsafe extern "efiapi" fn(u64, usize) -> usize =
+            core::mem::transmute(bs.free_pages);
+        free(address, pages);
+    }
 }
 
 unsafe fn inspect_ax210(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut c_void) -> usize) {

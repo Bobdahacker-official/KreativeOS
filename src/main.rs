@@ -4,6 +4,7 @@
 extern crate alloc;
 mod audio;
 mod ax210;
+mod ax_dma;
 mod boot;
 mod desktop;
 mod e1000;

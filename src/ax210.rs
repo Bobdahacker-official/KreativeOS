@@ -142,6 +142,12 @@ pub fn probe() -> Status {
     } else if unsafe { FIRMWARE_LEN != 0 } {
         unsafe { hardware::log(b"KreativeOS: AX210 firmware rejected\r\n") };
     }
+    if let Some(dma) = unsafe { crate::ax_dma::BOOTSTRAP.as_ref() } {
+        let mut line: Text<128> = Text::new();
+        let _ = write!(line, "KreativeOS: AX210 DMA prepared (IML {:#x}/{}; LMAC {} at {:#x}; UMAC {} at {:#x}; paging {})\r\n",
+            dma.iml.address, dma.iml.bytes, dma.counts[0], dma.lmac[0].address, dma.counts[1], dma.umac[0].address, dma.counts[2]);
+        unsafe { hardware::log(&line.bytes[..line.len]) };
+    }
     Status {
         pci: found,
         firmware,
