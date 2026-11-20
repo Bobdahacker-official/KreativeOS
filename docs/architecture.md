@@ -6,13 +6,13 @@ The kernel masks legacy PIC interrupts and runs a polling loop. PIT channel 2 ca
 
 RTL8139 discovery uses PCI configuration mechanism 1. Receive and transmit DMA use a reserved allocation below 4 GiB. Frames pass through length, destination and checksum checks before reaching the single HTTP client. DHCP tracks discovery, renewal, rebinding and expiration independently of browser requests. ARP caches validated next-hop replies for up to 60 seconds. The DNS resolver checks the server endpoint, transaction ID and echoed question, then follows bounded CNAME chains. Ethernet hardware, transport state and browser text are separated into driver and application state.
 
-KFS uses ATA PIO on a dedicated disk. Two 100-sector snapshots alternate. Each has a magic, generation, checksum and 24 fixed-size file records. A save invalidates the destination header, flushes all payload sectors and publishes the new header last. Mount validates payload checksums before selecting the latest valid snapshot. Disk errors are surfaced to the desktop; they do not silently report persistence.
+New data volumes use exFAT over USB bulk-only transport, NVMe, AHCI or ATA PIO. The filesystem writes ordinary root files, checks directory entry sets, and guards metadata changes with the volume dirty flag and transport flushes. The block layer grants writes only inside the validated data partition. Explicit legacy KFS images still use two alternating checksummed snapshots.
 
-Applications share one cooperative kernel event loop. Window order is independent of stable taskbar slots. Package installation creates persistent document applications. The developer pack stages host files during UEFI boot and imports them into KFS on explicit request. Imported terminal scripts use the same interpreter and privileges as the interactive terminal.
+Applications share one cooperative kernel event loop. Window order is independent of stable taskbar slots. Package installation creates persistent document applications. The developer pack stages host files during UEFI boot and imports them into the data volume on explicit request. Imported terminal scripts use the same interpreter and privileges as the interactive terminal.
 
 `ring3.rs` creates a page table root for each run. Existing kernel mappings have their user bit cleared at the top level. A separate branch maps user code read-only and executable and maps the stack read/write with NX. A TSS points interrupts at a kernel stack. The interrupt ABI offers output from validated user ranges and process exit. An APIC deadline and CPU exception gates return control to the calling desktop or user console. Programs run one at a time and have no filesystem or device system calls.
 
-`users.rs` persists salted PBKDF2-SHA256 password records in KFS. The boot sign-in screen routes the administrator to the desktop and standard users to a command console. The console exposes only executables assigned to that username. KFS remains a single administrator-managed volume.
+`users.rs` persists salted PBKDF2-SHA256 password records on the data volume. The boot sign-in screen routes the administrator to the desktop and standard users to a command console. The console exposes only executables assigned to that username. The data volume is managed by the administrator.
 
 Source map:
 
@@ -21,7 +21,9 @@ Source map:
 | `boot.rs` | UEFI ABI and boot transition |
 | `hardware.rs` | Port I/O, PCI, PS/2, serial, timer, RTC |
 | `graphics.rs` | Pixel composition, glyphs, lines, text |
-| `storage.rs` | ATA PIO, KFS mount and commit |
+| `storage.rs` | Data disk selection, bounded block access and legacy KFS |
+| `exfat.rs` | exFAT validation, allocation and persistent root files |
+| `usb.rs` | xHCI, USB HID boot input and bulk-only mass storage |
 | `net.rs` | RTL8139, ARP, DNS, TCP, HTTP and HTML text |
 | `desktop.rs` | Window manager, apps, package installation |
 | `text.rs` | Fixed-capacity strings |

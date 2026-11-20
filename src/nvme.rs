@@ -1,7 +1,7 @@
 //! NVMe PCIe transport with polled admin and NVM queues.
 use crate::{
     hardware::{millis, pci, pci_write},
-    storage::{identity_mmio, marked_volume, MARKER_LBA, WRITE_LBAS},
+    storage::{identity_mmio, marked_volume, Media, MARKER_LBA},
     text::Text,
 };
 use core::{
@@ -63,6 +63,7 @@ pub struct Disk {
     pub namespace: u32,
     pub sectors: u64,
     pub model: Text<40>,
+    pub media: Option<Media>,
 }
 
 type Command = [u32; 16];
@@ -227,9 +228,10 @@ impl Disk {
         self.sectors = sectors;
         let mut label = [0; SECTOR];
         let mut first = [0; SECTOR];
-        self.transfer(MARKER_LBA, &mut label, false)
-            && self.transfer(0, &mut first, false)
-            && marked_volume(&label, &first)
+        if self.transfer(MARKER_LBA, &mut label, false) && self.transfer(0, &mut first, false) {
+            self.media = marked_volume(&label, &first, self.sectors);
+        }
+        self.media.is_some()
     }
 
     unsafe fn find_namespace(&mut self) -> bool {
@@ -266,7 +268,7 @@ impl Disk {
             || data.is_empty()
             || data.len() % SECTOR != 0
             || end > self.sectors
-            || (store && (!WRITE_LBAS.contains(&lba) || end > u64::from(WRITE_LBAS.end)))
+            || (store && !self.media.is_some_and(|media| media.writable(lba, end)))
         {
             return false;
         }
@@ -380,6 +382,7 @@ pub unsafe fn discover() -> Option<Disk> {
                     namespace: 0,
                     sectors: 0,
                     model: Text::new(),
+                    media: None,
                 };
                 pci_write(bus, slot, function, 4, pci_flags | 6);
                 if disk.start() && disk.find_namespace() {

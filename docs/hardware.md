@@ -10,13 +10,14 @@ The driver checks DMA and 48-bit LBA support, logical sector size and disk capac
 
 | Supported path | Requirements |
 |---|---|
-| Physical SATA disk or SSD | Standard AHCI controller, directly attached SATA drive, 512-byte logical sectors, 48-bit LBA and a marked KFS image |
+| Physical SATA disk or SSD | Standard AHCI controller, directly attached SATA drive, 512-byte logical sectors, 48-bit LBA and a marked exFAT or legacy image |
 | QEMU SATA profile | ICH9 AHCI with a dedicated data image. The guest negotiates and executes its own DMA commands. [QEMU AHCI implementation](https://github.com/qemu/qemu/blob/master/hw/ide/ahci.c) |
-| Physical PCIe NVMe SSD | Standard NVMe PCIe controller, a 512-byte namespace without metadata or protection information, and marked KFS media |
-| QEMU NVMe profile | PCIe NVMe controller with a marked KFS namespace. [QEMU NVMe documentation](https://www.qemu.org/docs/master/system/devices/nvme.html) |
+| Physical PCIe NVMe SSD | Standard NVMe PCIe controller, a 512-byte namespace without metadata or protection information, and marked data media |
+| USB flash or external storage | xHCI root port, USB mass storage BOT, LUN 0 and 512-byte sectors on a marked exFAT disk. [USB specifics and ASRock profile](a520m-hvs.md) |
+| QEMU NVMe profile | PCIe NVMe controller with a marked data namespace. [QEMU NVMe documentation](https://www.qemu.org/docs/master/system/devices/nvme.html) |
 | Legacy IDE | Existing primary-master KFS data images remain usable with the IDE launch profile. |
 
-The kernel polls command completion and gives each native controller driver a separate DMA arena below 4 GiB. There is no automatic repartitioning or disk hotplug workflow. AHCI does not perform a controller-wide reset. RAID, ATAPI and USB storage use separate transports outside these drivers' scope.
+The kernel polls command completion and gives each native controller driver a separate DMA arena below 4 GiB. There is no automatic repartitioning or disk hotplug workflow. AHCI does not perform a controller-wide reset. RAID, ATAPI and UASP use separate transports outside these drivers' scope.
 
 ## NVMe PCIe
 

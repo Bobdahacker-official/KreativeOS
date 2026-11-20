@@ -104,9 +104,10 @@ impl Center {
         let mut report = Text::<2048>::new();
         let _ = writeln!(
             report,
-            "KreativeOS Hardware Center\nCPU: {}\nStorage: {}",
+            "KreativeOS Hardware Center\nCPU: {}\nStorage: {}\nFilesystem: {}",
             self.cpu.str(),
-            storage::backend()
+            storage::backend(),
+            storage::filesystem()
         );
         if let Some(disk) = storage::drive_details() {
             let (bus, slot, function) = disk.bdf;
@@ -241,7 +242,14 @@ impl Center {
                     storage::used_slots(),
                     storage::COUNT
                 );
-                card(s, x + 20, y + 203, w - 40, "KFS volume", value.str());
+                card(
+                    s,
+                    x + 20,
+                    y + 203,
+                    w - 40,
+                    storage::filesystem(),
+                    value.str(),
+                );
                 if let Some(disk) = storage::drive_details() {
                     let (bus, slot, function) = disk.bdf;
                     value.clear();

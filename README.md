@@ -17,7 +17,7 @@ rustup target add x86_64-unknown-uefi
 bash scripts/build.sh
 ```
 
-The build produces `build/KreativeOS.img`, a 64 MiB partitioned UEFI boot disk, `build/esp/EFI/BOOT/BOOTX64.EFI`, and separate 8 MiB IDE, SATA and NVMe data images. Existing data images are preserved on rebuild.
+The build produces `build/KreativeOS.img`, a 64 MiB partitioned UEFI boot disk, `build/esp/EFI/BOOT/BOOTX64.EFI`, and `build/KreativeOS-exfat.img` for persistent data. Existing data images are preserved on rebuild.
 
 For QEMU, install `qemu-system-x86` and `ovmf`, then run:
 
@@ -38,6 +38,17 @@ The headless launch writes serial output to `build/serial.log`. Omit `-Headless`
 Use `.\scripts\run.ps1 -Storage SATA -Headless` on Windows or `STORAGE=sata bash scripts/run.sh -display none` on Linux to use the native AHCI driver. Both commands attach the same type of data image used by the bare-metal driver.
 Use `.\scripts\run.ps1 -Storage NVME -Headless` or `STORAGE=nvme bash scripts/run.sh -display none` for the native NVMe driver.
 
+### ASRock A520M-HVS USB profile
+
+```powershell
+.\scripts\build.ps1 -PrepareUsb
+.\scripts\run-a520.ps1 -Headless
+```
+
+The first command creates `build/KreativeOS-A520-usb.img` with a FAT EFI boot partition and a separate exFAT data partition. It refuses to overwrite an existing USB image. Set `KREATIVE_USB_IMAGE` to a new image filename to build another copy. The second command boots that image in QEMU with xHCI storage, keyboard and mouse. Omit `-Headless` for the desktop. These commands use local image files and do not write to any physical drive or change Windows boot settings.
+
+The image also provides the removable UEFI boot path `EFI/BOOT/BOOTX64.EFI`. For physical boot, use dedicated removable media and the firmware's one-time boot menu. Connect the keyboard and mouse to motherboard ports before boot. See [A520M-HVS compatibility notes](docs/a520m-hvs.md).
+
 Set `OVMF_CODE` and `OVMF_VARS` if your firmware files use different paths. The supplied machine uses 256 MiB RAM, standard VGA, PS/2 input, RTL8139 Ethernet, a VirtIO boot disk (read by UEFI), and an IDE primary-master data disk. The operating system contains no Linux components; Linux, macOS or Windows can be used as a build host.
 
 GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and checks HTTPS against local TLS servers. It uploads the images, serial logs and desktop screenshot as `KreativeOS-x86_64`.
@@ -46,7 +57,7 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 
 - tiny-skia vector icons, a composited pointer, antialiased Open Sans, an aurora wallpaper, and a three-column app launcher with workspace search. Click 1–4 at the top right to switch workspaces. Windows support dragging, minimizing, maximizing and closing.
 - PS/2 keyboard, standard PS/2 mice, and IntelliMouse-compatible scroll wheels.
-- Files and Notes with a persistent, checksummed, two-snapshot KFS volume.
+- Files and Notes with persistent exFAT files and Notes draft recovery.
 - Terminal with file operations, app launching, network status, calculation and reboot.
 - HTTP and HTTPS browser with DNS resolution, local HTML documents, inline images and WAV playback over HTTPS.
 - Calculator with checked integer arithmetic, operator precedence and parentheses.
@@ -56,7 +67,7 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 - Two-player Tic Tac Toe with turn management, win detection and restart.
 - Local KAPP1 document packages, installation persistence and a launcher entry.
 - Separate Ethernet and ESP-AT Wi-Fi panels. Ethernet shows link speed, the active IPv4 configuration and remaining DHCP lease time, and saves automatic or manual profiles with a VLAN setting.
-- Hardware Center shows the processor, active storage and Ethernet drivers, a searchable PCI inventory, and KFS usage. Use **Save report** to export the inventory to `Hardware.txt`.
+- Hardware Center shows the processor, active storage and Ethernet drivers, the mounted filesystem, and a searchable PCI inventory. Use **Save report** to export the inventory to `Hardware.txt`.
 - Settings with three accent colors, save-all and restart.
 
 F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
@@ -93,11 +104,11 @@ The gallery reads up to 36 imported images from packs totaling 6 MiB. Each image
 
 ## Files and packages
 
-KFS has 24 file entries, 32-byte ASCII names and 2 KiB per file. It stores snapshots in sectors 2048–2247, committing the header last. KreativeOS looks for marked NVMe media first, then marked AHCI SATA media, then a dedicated legacy primary-master ATA disk. It mounts one data volume. Unrecognized nonblank KFS snapshots are rejected. A missing disk leaves files available in memory, and Save reports that state.
+New volumes use standard exFAT. KreativeOS loads up to 24 supported root files, with ASCII names up to 32 bytes and up to 2 KiB per file. The kernel mounts one prepared data volume, looking for USB first, then NVMe, AHCI SATA, and finally IDE. Files in a new image are normal exFAT directory entries. Existing KFS data images can still be attached explicitly using `KREATIVE_DATA_IMAGE`.
 
 ### SSDs, HDDs and data migration
 
-Use `build/KreativeOS-sata.img` with a SATA SSD or HDD and `build/KreativeOS-nvme.img` with an NVMe SSD. For a physical PC, use UEFI boot and an AHCI controller for SATA drives. Put the boot image and data image on **separate dedicated media**. Both native drivers require 512-byte logical sectors, including drives with 4 KiB physical sectors that expose 512-byte logical sectors. A marked disk can be larger than the image. The drivers check the marker and a blank sector 0 before selecting a volume and limit writes to the KFS snapshot and draft areas.
+Use `KreativeOS-exfat.img` with a dedicated SATA SSD, HDD or NVMe SSD. The combined USB image is available when boot and data should live on one removable drive. The data transports use 512-byte logical sectors, including drives that expose 512-byte sectors over 4 KiB physical sectors. The driver checks the KreativeOS marker and the partition geometry and confines filesystem writes to the data partition.
 
 To copy legacy files and accounts to a new SATA image while keeping the original image:
 
@@ -123,7 +134,7 @@ open Snake
 save
 ```
 
-The included `Guide.kapp` is installed as `Guide.app`. Its KAPP1 header contains a name, version and document body. Installation validates the format and writes the installed document to KFS.
+The included `Guide.kapp` is installed as `Guide.app`. Its KAPP1 header contains a name, version and document body. Installation validates the format and writes the installed document to the data volume.
 
 ## Develop on the host
 
@@ -136,16 +147,16 @@ run setup.ksh
 browse file:Demo.html
 ```
 
-`dev import` preserves existing filenames. Import requires sufficient free KFS file slots. A `.ksh` file contains one KreativeOS terminal command per line and runs when the administrator invokes `run`.
+`dev import` preserves existing filenames. Import requires sufficient free file slots. A `.ksh` file contains one KreativeOS terminal command per line and runs when the administrator invokes `run`.
 
 ### Accounts and native programs
 
 1. On a fresh data disk, run `accounts` in Terminal to set the administrator password. Once configured, KreativeOS starts at sign-in.
 2. Run `accounts add` as `admin` to create a standard account. Run `accounts` to list accounts and available administration commands.
-3. Name a program `alice.hello.kr3` to assign it to `alice`. Use `dev import` to install the program to KFS. The administrator can also try it with `exec alice.hello.kr3` from Terminal.
+3. Name a program `alice.hello.kr3` to assign it to `alice`. Use `dev import` to install the program. The administrator can also try it with `exec alice.hello.kr3` from Terminal.
 4. Run `lock` and sign in as `alice`. In the user console, run `ls` and then `exec hello.kr3`. Use `passwd` to change the account password or `logout` to return to sign-in.
 
-The administrator has the desktop and KFS management tools. Standard accounts enter a console whose executable lookup is scoped to the signed-in username. The KR3 runner maps executable code and a writable, non-executable stack into CPU ring 3. An invalid memory access or a CPU exception stops the program. The local APIC timer limits each run to roughly 250 ms.
+The administrator has the desktop and file management tools. Standard accounts enter a console whose executable lookup is scoped to the signed-in username. The KR3 runner maps executable code and a writable, non-executable stack into CPU ring 3. An invalid memory access or a CPU exception stops the program. The local APIC timer limits each run to roughly 250 ms.
 
 Build the example with NASM:
 

@@ -106,6 +106,10 @@ pub unsafe fn init() {
     }
     out8(0x61, gate);
     START = ticks();
+    if in8(0x64) == 0xff {
+        log(b"KreativeOS: PS/2 controller absent\r\n");
+        return;
+    }
     for _ in 0..1024 {
         if in8(0x64) & 1 == 0 {
             break;
@@ -160,9 +164,12 @@ impl Input {
         }
     }
     pub fn poll(&mut self) -> Option<Event> {
+        if let Some(event) = crate::usb::poll() {
+            return Some(event);
+        }
         unsafe {
             let s = in8(0x64);
-            if s & 1 == 0 {
+            if s == 0xff || s & 1 == 0 {
                 return None;
             }
             let b = in8(0x60);

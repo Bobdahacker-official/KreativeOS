@@ -9,7 +9,7 @@ use core::{
 };
 
 pub const PAGES: usize = 16;
-use crate::storage::{identity_mmio, marked_volume, MARKER_LBA, WRITE_LBAS};
+use crate::storage::{identity_mmio, marked_volume, Media, MARKER_LBA};
 const CL: usize = 0;
 const RFIS: usize = 1024;
 const TABLE: usize = 1280;
@@ -40,6 +40,7 @@ pub struct Disk {
     pub bdf: (u8, u8, u8),
     pub sectors: u64,
     pub model: Text<40>,
+    pub media: Option<Media>,
     usable: bool,
 }
 
@@ -173,7 +174,7 @@ impl Disk {
         let end = u64::from(lba) + bytes.len() as u64 / 512;
         if bytes.is_empty()
             || end > self.sectors
-            || (write && (!WRITE_LBAS.contains(&lba) || end > u64::from(WRITE_LBAS.end)))
+            || (write && !self.media.is_some_and(|media| media.writable(lba, end)))
         {
             return false;
         }
@@ -266,6 +267,7 @@ pub unsafe fn discover() -> Option<Disk> {
                         bdf: (b, d, f),
                         sectors: 0,
                         model: Text::new(),
+                        media: None,
                         usable: true,
                     };
                     if !disk.start() {
@@ -279,9 +281,11 @@ pub unsafe fn discover() -> Option<Disk> {
                     if disk.identify()
                         && disk.transfer(MARKER_LBA, &mut label, false)
                         && disk.transfer(0, &mut first, false)
-                        && marked_volume(&label, &first)
                     {
-                        return Some(disk);
+                        if let Some(media) = marked_volume(&label, &first, disk.sectors) {
+                            disk.media = Some(media);
+                            return Some(disk);
+                        }
                     }
                     if !disk.stop() {
                         return None;

@@ -35,6 +35,7 @@ jobs:
             build/KreativeOS-data.img
             build/KreativeOS-sata.img
             build/KreativeOS-nvme.img
+            build/KreativeOS-exfat.img
             build/esp/EFI/BOOT/BOOTX64.EFI
             build/SHA256SUMS
             build/desktop.png

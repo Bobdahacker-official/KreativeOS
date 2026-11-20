@@ -26,9 +26,11 @@ try:
         raise RuntimeError('Desktop did not boot within 60 seconds: '+
                            (log.read_text(errors='replace') if log.exists() else 'no serial log'))
     if os.environ.get('STORAGE') == 'sata':
-        assert b'KFS mounted through AHCI' in log.read_bytes(), 'SATA profile did not mount KFS through AHCI'
+        assert b'exFAT mounted through AHCI' in log.read_bytes(), 'SATA profile did not mount exFAT through AHCI'
     if os.environ.get('STORAGE') == 'nvme':
-        assert b'KFS mounted through NVMe' in log.read_bytes(), 'NVMe profile did not mount KFS through NVMe'
+        assert b'exFAT mounted through NVMe' in log.read_bytes(), 'NVMe profile did not mount exFAT through NVMe'
+    if os.environ.get('STORAGE') == 'usb':
+        assert b'exFAT mounted through USB' in log.read_bytes(), 'USB profile did not mount exFAT through xHCI'
     message()
     def command(name, args=None):
         p.stdin.write((json.dumps({'execute':name, 'arguments':args or {}})+'\n').encode())

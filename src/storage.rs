@@ -14,14 +14,65 @@ const LABELS: [&[u8]; 2] = [
     b"KreativeOS KFS AHCI data disk\0\x01",
     b"KreativeOS KFS data disk\0\x01",
 ];
+const EXFAT_LABEL: &[u8] = b"KreativeOS dedicated exFAT\0\x01";
 
-pub fn marked_volume(label: &[u8; 512], first: &[u8; 512]) -> bool {
-    first.iter().all(|&b| b == 0)
+#[derive(Clone, Copy)]
+pub enum Media {
+    Legacy,
+    Exfat(u32),
+}
+
+impl Media {
+    pub fn writable(self, base: u32, end: u64) -> bool {
+        let range = match self {
+            Self::Legacy => WRITE_LBAS,
+            Self::Exfat(start) => start..start + crate::exfat::LENGTH,
+        };
+        range.contains(&base) && end <= u64::from(range.end)
+    }
+}
+
+pub fn marked_volume(label: &[u8; 512], first: &[u8; 512], sectors: u64) -> Option<Media> {
+    if first.iter().all(|&b| b == 0)
         && LABELS.iter().any(|marker| {
             label
                 .strip_prefix(*marker)
                 .is_some_and(|rest| rest.iter().all(|&b| b == 0))
         })
+    {
+        return Some(Media::Legacy);
+    }
+    if first[510..] != [0x55, 0xaa]
+        || !label
+            .strip_prefix(EXFAT_LABEL)
+            .is_some_and(|rest| rest.iter().all(|&b| b == 0))
+    {
+        return None;
+    }
+    let mut found = None;
+    let mut boot = false;
+    for entry in first[446..510].chunks_exact(16) {
+        if entry.iter().all(|&byte| byte == 0) {
+            continue;
+        }
+        let start = u32::from_le_bytes(entry[8..12].try_into().unwrap());
+        let length = u32::from_le_bytes(entry[12..16].try_into().unwrap());
+        if entry[4] == 0x07
+            && matches!(start, 2048 | 131072)
+            && length == crate::exfat::LENGTH
+            && u64::from(start + length) <= sectors
+            && found.is_none()
+        {
+            found = Some(start);
+        } else if entry[4] == 0xef && start == 2048 && length == 129024 && !boot {
+            boot = true;
+        } else {
+            return None;
+        }
+    }
+    found
+        .filter(|&start| boot == (start == 131072))
+        .map(Media::Exfat)
 }
 
 // Kernel MMIO currently uses the firmware's identity map.
@@ -67,16 +118,64 @@ impl File {
 pub static mut FILES: [File; COUNT] = [File::new(); COUNT];
 pub static mut DISK: bool = false;
 enum Driver {
-    Ide,
+    Ide(Media),
     Ahci(crate::ahci::Disk),
     Nvme(crate::nvme::Disk),
+    Usb(crate::usb::Disk),
 }
 static mut DRIVER: Option<Driver> = None;
+static mut EXFAT: Option<crate::exfat::Volume> = None;
+
+pub fn blocks(base: u32, data: &mut [u8], write: bool) -> bool {
+    if data.is_empty() || data.len() % 512 != 0 {
+        return false;
+    }
+    unsafe {
+        if let Some(result) = dma_transfer(base, data, write) {
+            return result;
+        }
+        if let Some(Driver::Ide(media)) = &DRIVER {
+            if write && !media.writable(base, u64::from(base) + (data.len() / 512) as u64) {
+                return false;
+            }
+            return data
+                .chunks_exact_mut(512)
+                .enumerate()
+                .all(|(offset, buffer)| sector(base + offset as u32, buffer, write));
+        }
+        false
+    }
+}
+
+fn media() -> Option<Media> {
+    unsafe {
+        match &DRIVER {
+            Some(Driver::Ide(media)) => Some(*media),
+            Some(Driver::Ahci(disk)) => disk.media,
+            Some(Driver::Nvme(disk)) => disk.media,
+            Some(Driver::Usb(disk)) => disk.media,
+            None => None,
+        }
+    }
+}
+
+pub fn filesystem() -> &'static str {
+    unsafe {
+        if EXFAT.is_some() {
+            "exFAT"
+        } else if DISK {
+            "KFS (legacy)"
+        } else {
+            "Memory"
+        }
+    }
+}
 
 unsafe fn dma_transfer(base: u32, data: &mut [u8], write: bool) -> Option<bool> {
     match &mut DRIVER {
         Some(Driver::Ahci(disk)) => Some(disk.transfer(base, data, write)),
         Some(Driver::Nvme(disk)) => Some(disk.transfer(base, data, write)),
+        Some(Driver::Usb(disk)) => Some(disk.transfer(base, data, write)),
         _ => None,
     }
 }
@@ -200,19 +299,44 @@ unsafe fn load(b: &[u8]) {
     }
 }
 pub unsafe fn init() {
-    DRIVER = crate::nvme::discover()
-        .map(Driver::Nvme)
+    DRIVER = crate::usb::discover()
+        .map(Driver::Usb)
+        .or_else(|| crate::nvme::discover().map(Driver::Nvme))
         .or_else(|| crate::ahci::discover().map(Driver::Ahci));
     if DRIVER.is_none() {
         // Legacy dedicated primary-master data disk.
         out8(0x1f6, 0xe0);
         let s = in8(0x1f7);
         if s != 0 && s != 255 {
-            DRIVER = Some(Driver::Ide);
+            let mut first = [0; 512];
+            let mut label = [0; 512];
+            if sector(0, &mut first, false) && sector(MARKER_LBA, &mut label, false) {
+                if let Some(kind) = marked_volume(&label, &first, u64::from(u32::MAX)) {
+                    DRIVER = Some(Driver::Ide(kind));
+                } else if first.iter().all(|&b| b == 0)
+                    && [(SNAP_A, &mut BUFFER), (SNAP_B, &mut OTHER)]
+                        .into_iter()
+                        .any(|(lba, record)| {
+                            record
+                                .chunks_exact_mut(512)
+                                .enumerate()
+                                .all(|(i, buffer)| sector(lba + i as u32, buffer, false))
+                                && valid(record)
+                        })
+                {
+                    DRIVER = Some(Driver::Ide(Media::Legacy));
+                }
+            }
         }
     }
     DISK = DRIVER.is_some();
-    if DISK {
+    if let Some(Media::Exfat(start)) = media() {
+        EXFAT = crate::exfat::Volume::mount(start).filter(|volume| volume.load(&mut FILES));
+        DISK = EXFAT.is_some();
+        if !DISK {
+            FILES.fill(File::new());
+        }
+    } else if DISK {
         let read_a = read_record(SNAP_A, &mut BUFFER);
         let read_b = read_record(SNAP_B, &mut OTHER);
         if read_a || read_b {
@@ -244,6 +368,18 @@ pub unsafe fn init() {
     }
     if DISK {
         match DRIVER {
+            Some(Driver::Nvme(_)) if EXFAT.is_some() => {
+                log(b"KreativeOS: exFAT mounted through NVMe\r\n")
+            }
+            Some(Driver::Ahci(_)) if EXFAT.is_some() => {
+                log(b"KreativeOS: exFAT mounted through AHCI\r\n")
+            }
+            Some(Driver::Ide(_)) if EXFAT.is_some() => {
+                log(b"KreativeOS: exFAT mounted through IDE\r\n")
+            }
+            Some(Driver::Usb(_)) if EXFAT.is_some() => {
+                log(b"KreativeOS: exFAT mounted through USB\r\n")
+            }
             Some(Driver::Nvme(_)) => log(b"KreativeOS: KFS mounted through NVMe\r\n"),
             Some(Driver::Ahci(_)) => log(b"KreativeOS: KFS mounted through AHCI\r\n"),
             _ => {}
@@ -257,7 +393,9 @@ pub fn backend() -> &'static str {
         match (DISK, &DRIVER) {
             (true, Some(Driver::Nvme(_))) => "PCIe / NVMe",
             (true, Some(Driver::Ahci(_))) => "SATA / AHCI DMA",
-            (true, Some(Driver::Ide)) => "IDE / ATA PIO",
+            (true, Some(Driver::Ide(_))) => "IDE / ATA PIO",
+            (true, Some(Driver::Usb(_))) => "USB / xHCI",
+            (false, Some(Driver::Usb(_))) => "USB volume rejected",
             (false, Some(Driver::Nvme(_))) => "NVMe volume rejected",
             (false, Some(Driver::Ahci(_))) => "AHCI volume rejected",
             _ => "Memory only",
@@ -290,6 +428,13 @@ pub fn drive_details() -> Option<DriveDetails> {
                 sectors: disk.sectors,
                 model: disk.model,
             }),
+            Some(Driver::Usb(disk)) => Some(DriveDetails {
+                bdf: disk.bdf,
+                location: "USB port",
+                unit: u32::from(disk.port),
+                sectors: disk.sectors,
+                model: disk.model,
+            }),
             _ => None,
         }
     }
@@ -301,7 +446,11 @@ pub fn used_slots() -> usize {
 
 pub fn previous_generation() -> Option<u32> {
     unsafe {
-        if !DISK || !read_record(snapshot_base(GEN.wrapping_add(1)), &mut OTHER) || !valid(&OTHER) {
+        if !DISK
+            || EXFAT.is_some()
+            || !read_record(snapshot_base(GEN.wrapping_add(1)), &mut OTHER)
+            || !valid(&OTHER)
+        {
             return None;
         }
         let generation = get32(&OTHER, 4);
@@ -344,8 +493,14 @@ pub fn load_draft() -> Option<(Text<32>, Text<CAP>)> {
         }
         let mut first = [0; 512 * DRAFT_SECTORS];
         let mut second = [0; 512 * DRAFT_SECTORS];
-        let a = read_record(draft_base(0), &mut first) && draft_valid(&first);
-        let b = read_record(draft_base(1), &mut second) && draft_valid(&second);
+        let (a, b) = if let Some(volume) = &EXFAT {
+            (volume.read_draft(&mut first) && draft_valid(&first), false)
+        } else {
+            (
+                read_record(draft_base(0), &mut first) && draft_valid(&first),
+                read_record(draft_base(1), &mut second) && draft_valid(&second),
+            )
+        };
         let record = if a && (!b || !newer(get32(&second, 4), get32(&first, 4))) {
             first
         } else if b {
@@ -382,7 +537,12 @@ pub fn store_draft(name: &Text<32>, data: &Text<CAP>) -> bool {
         record[512..512 + data.len].copy_from_slice(&data.bytes[..data.len]);
         let hash = checksum(&record[12..]);
         record[8..12].copy_from_slice(&hash.to_le_bytes());
-        if !publish_record(draft_base(next), &mut record) {
+        let success = if let Some(volume) = &mut EXFAT {
+            volume.save_draft(&record)
+        } else {
+            publish_record(draft_base(next), &mut record)
+        };
+        if !success {
             return false;
         }
         DRAFT_GEN = Some(next);
@@ -390,7 +550,13 @@ pub fn store_draft(name: &Text<32>, data: &Text<CAP>) -> bool {
     }
 }
 pub fn find(name: &str) -> Option<usize> {
-    unsafe { FILES.iter().position(|f| f.used && f.name.str() == name) }
+    unsafe {
+        FILES.iter().position(|f| {
+            f.used
+                && (f.name.str() == name
+                    || (EXFAT.is_some() && f.name.str().eq_ignore_ascii_case(name)))
+        })
+    }
 }
 pub fn put(name: &str, data: &[u8]) -> Result<(), &'static str> {
     if name.is_empty()
@@ -399,6 +565,11 @@ pub fn put(name: &str, data: &[u8]) -> Result<(), &'static str> {
         || !name.is_ascii()
         || name.contains('/')
         || name.contains('\\')
+        || unsafe {
+            EXFAT.is_some()
+                && (!crate::exfat::valid_name(name)
+                    || name.eq_ignore_ascii_case(crate::exfat::DRAFT))
+        }
     {
         return Err("Invalid file name or size");
     }
@@ -428,6 +599,9 @@ pub fn sync() -> bool {
     unsafe {
         if !DISK {
             return false;
+        }
+        if let Some(volume) = &mut EXFAT {
+            return volume.save(&FILES);
         }
         BUFFER.fill(0);
         for i in 0..COUNT {

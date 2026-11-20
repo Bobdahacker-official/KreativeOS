@@ -1,3 +1,5 @@
+param([switch]$PrepareUsb)
+
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location -LiteralPath $root
@@ -28,6 +30,12 @@ try {
     Copy-Item -LiteralPath (Join-Path $target 'x86_64-unknown-uefi\release\kreativeos.efi') -Destination $loader
     & $pythonPath scripts/image.py
     if ($LASTEXITCODE -ne 0) { throw "Image builder exited with code $LASTEXITCODE." }
+    if ($PrepareUsb) {
+        $usbImage = if ($env:KREATIVE_USB_IMAGE) { $env:KREATIVE_USB_IMAGE } else { Join-Path $build 'KreativeOS-A520-usb.img' }
+        & $pythonPath scripts/exfat_image.py $usbImage --boot-image (Join-Path $build 'KreativeOS.img')
+        if ($LASTEXITCODE -ne 0) { throw 'USB image creation failed. Choose a new image path with KREATIVE_USB_IMAGE.' }
+        Write-Host "Prepared $usbImage"
+    }
     $hashes = foreach ($file in @((Join-Path $build 'KreativeOS.img'), $loader)) {
         $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
         "$hash  $($file.Replace('\', '/'))"

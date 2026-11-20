@@ -4,6 +4,7 @@ from pathlib import Path
 import struct, os
 from pack_images import pack
 from sata_image import create as create_data, NVME_MARKER
+from exfat_image import create as create_exfat
 ROOT = Path(__file__).resolve().parent.parent
 out = ROOT / os.environ.get('KREATIVE_BUILD_DIR', 'build')
 loader = (out / 'esp/EFI/BOOT/BOOTX64.EFI').read_bytes()
@@ -131,4 +132,7 @@ if not with_sata.exists():
 with_nvme = out / 'KreativeOS-nvme.img'
 if not with_nvme.exists():
     create_data(with_nvme, marker=NVME_MARKER)
+exfat_data = out / 'KreativeOS-exfat.img'
+if not exfat_data.exists():
+    create_exfat(exfat_data)
 print(f'Built KreativeOS.img: {len(image)} bytes; EFI loader: {len(loader)} bytes')
