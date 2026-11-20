@@ -82,7 +82,14 @@ impl Network {
             host: Text::new(),
             path: Text::new(),
             state: 0,
-            secure: false, remote_port: 80, tls_pending: false, verified: false, cert_rejected: false, raw: VecDeque::with_capacity(32768), raw_eof: false, raw_waiting: false,
+            secure: false,
+            remote_port: 80,
+            tls_pending: false,
+            verified: false,
+            cert_rejected: false,
+            raw: VecDeque::with_capacity(32768),
+            raw_eof: false,
+            raw_waiting: false,
             seq: 0,
             ack: 0,
             port: 49152,
@@ -267,7 +274,12 @@ impl Network {
     }
     pub fn browse(&mut self, url: &str) {
         self.body.clear();
-        self.verified=false;self.cert_rejected=false; self.tls_pending=false; self.raw.clear(); self.raw_eof=false; self.raw_waiting=false;
+        self.verified = false;
+        self.cert_rejected = false;
+        self.tls_pending = false;
+        self.raw.clear();
+        self.raw_eof = false;
+        self.raw_waiting = false;
         self.changed = true;
         self.have_gateway = false;
         self.last_len = 0;
@@ -276,15 +288,32 @@ impl Network {
             return;
         }
         let s = if let Some(v) = url.strip_prefix("https://") {
-            self.secure=true; self.remote_port=443; v
+            self.secure = true;
+            self.remote_port = 443;
+            v
         } else if let Some(v) = url.strip_prefix("http://") {
-            self.secure=false;self.remote_port=80;v
+            self.secure = false;
+            self.remote_port = 80;
+            v
         } else {
             self.fail("Use an https://, http:// or file: address");
             return;
         };
         let (authority, path) = s.split_once('/').unwrap_or((s, ""));
-        let host=if let Some((h,p))=authority.split_once(':'){match p.parse::<u16>() {Ok(port) if port>0=>{self.remote_port=port;h},_=>{self.fail("Invalid port");return}}}else{authority};
+        let host = if let Some((h, p)) = authority.split_once(':') {
+            match p.parse::<u16>() {
+                Ok(port) if port > 0 => {
+                    self.remote_port = port;
+                    h
+                }
+                _ => {
+                    self.fail("Invalid port");
+                    return;
+                }
+            }
+        } else {
+            authority
+        };
         if host.len() > 127
             || path.len() > 250
             || host.contains(':')
@@ -343,9 +372,7 @@ impl Network {
                 }
                 if status & 1 != 0 {
                     for i in 0..len - 4 {
-                        f[i] = core::ptr::read_volatile(
-                            (DMA + self.rx + 4 + i) as *const u8,
-                        )
+                        f[i] = core::ptr::read_volatile((DMA + self.rx + 4 + i) as *const u8)
                     }
                 }
                 self.rx = (self.rx + len + 4 + 3) & !3;
@@ -360,7 +387,7 @@ impl Network {
             self.received += 1;
             self.frame(&f[..len]);
         }
-        if self.state != 0 && (self.state!=6 || self.raw_waiting) && millis() > self.deadline {
+        if self.state != 0 && (self.state != 6 || self.raw_waiting) && millis() > self.deadline {
             if self.retries >= 3 {
                 self.fail("Network request timed out")
             } else {
@@ -368,7 +395,8 @@ impl Network {
                 self.deadline = millis() + 1500;
                 if self.state == 1 {
                     self.arp(false, [0; 6], GATE)
-                } else if self.state == 2 || self.state == 3 || self.state == 4 || self.raw_waiting {
+                } else if self.state == 2 || self.state == 3 || self.state == 4 || self.raw_waiting
+                {
                     let mut copy = [0u8; 1536];
                     copy[..self.last_len].copy_from_slice(&self.last[..self.last_len]);
                     self.transmit(&copy[..self.last_len])
@@ -378,12 +406,21 @@ impl Network {
             }
         }
     }
-    pub fn raw_send(&mut self,data:&[u8]) {
-        self.tcp(0x18,data,true);self.seq=self.seq.wrapping_add(data.len() as u32);self.raw_waiting=true;
+    pub fn raw_send(&mut self, data: &[u8]) {
+        self.tcp(0x18, data, true);
+        self.seq = self.seq.wrapping_add(data.len() as u32);
+        self.raw_waiting = true;
     }
-    pub fn tls_result(&mut self,verified:bool,status:&'static str) {
-        if self.state==6 {self.tcp(0x11,&[],false);self.seq=self.seq.wrapping_add(1);}
-        self.state=0;self.raw_waiting=false;self.verified=verified;self.status=status;self.changed=true;
+    pub fn tls_result(&mut self, verified: bool, status: &'static str) {
+        if self.state == 6 {
+            self.tcp(0x11, &[], false);
+            self.seq = self.seq.wrapping_add(1);
+        }
+        self.state = 0;
+        self.raw_waiting = false;
+        self.verified = verified;
+        self.status = status;
+        self.changed = true;
     }
     fn frame(&mut self, f: &[u8]) {
         if f.len() < 14 {
@@ -514,7 +551,12 @@ impl Network {
             if self.state == 3 && flags & 0x12 == 0x12 && ack == self.seq {
                 self.ack = seq.wrapping_add(1);
                 self.tcp(0x10, &[], false);
-                if self.secure {self.state=6;self.tls_pending=true;self.status="Securing connection...";return;}
+                if self.secure {
+                    self.state = 6;
+                    self.tls_pending = true;
+                    self.status = "Securing connection...";
+                    return;
+                }
                 let mut req: Text<512> = Text::new();
                 req.append("GET ");
                 req.append(self.path.str());
@@ -526,13 +568,28 @@ impl Network {
                 self.state = 4;
                 self.status = "Receiving page";
             } else if self.state == 6 {
-                if flags&16!=0 && ack==self.seq {self.raw_waiting=false;}
-                if seq!=self.ack {if !d[off..].is_empty() {self.tcp(0x10,&[],false);}return;}
-                let data=&d[off..];
-                if self.raw.len()+data.len()>32768 {return;}
-                self.raw.extend(data.iter().copied());self.ack=self.ack.wrapping_add(data.len() as u32);
-                if flags&1!=0 {self.ack=self.ack.wrapping_add(1);self.raw_eof=true;}
-                if !data.is_empty()||flags&1!=0 {self.tcp(0x10,&[],false);}
+                if flags & 16 != 0 && ack == self.seq {
+                    self.raw_waiting = false;
+                }
+                if seq != self.ack {
+                    if !d[off..].is_empty() {
+                        self.tcp(0x10, &[], false);
+                    }
+                    return;
+                }
+                let data = &d[off..];
+                if self.raw.len() + data.len() > 32768 {
+                    return;
+                }
+                self.raw.extend(data.iter().copied());
+                self.ack = self.ack.wrapping_add(data.len() as u32);
+                if flags & 1 != 0 {
+                    self.ack = self.ack.wrapping_add(1);
+                    self.raw_eof = true;
+                }
+                if !data.is_empty() || flags & 1 != 0 {
+                    self.tcp(0x10, &[], false);
+                }
             } else if self.state >= 4 {
                 if ack != self.seq {
                     return;

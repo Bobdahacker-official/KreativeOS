@@ -1,22 +1,13 @@
 # Verification
 
-The build workflow performs a release compilation and one QEMU boot smoke check. The check waits for serial markers after ExitBootServices and desktop initialization, then captures the framebuffer and confirms that it contains rendered pixel variation.
+The release was built with Rust 1.100.0 for `x86_64-unknown-uefi` and booted in QEMU. The smoke check waits for the first desktop frame, then captures the framebuffer. The desktop screenshot in this repository came from that boot.
 
-This check does not establish hardware compatibility beyond the configured virtual machine, or verify network interoperability, persistence under power loss, all input paths or every app. Those features are implemented in the source but require focused runtime verification before their behavior can be reported as tested.
-
-Commands:
+The HTTPS check runs the guest against three local TLS 1.3 servers. The browser fetched a page from the trusted server and rejected a certificate for the wrong host and a certificate from an untrusted issuer. Only the trusted server received an HTTP request. The check builds its own guest with a temporary test root. The distribution uses the bundled Mozilla roots.
 
 ```sh
 bash scripts/build.sh
 python3 scripts/smoke.py
+python3 scripts/tls_check.py
 ```
 
-The boot image and EFI binary checksums are written to `build/SHA256SUMS`. CI preserves the serial log and screenshot alongside the disk images.
-
-## Recorded build
-
-The release compiled successfully with Rust 1.100.0 for `x86_64-unknown-uefi`. The QEMU boot check passed on 15 November 2026, including ExitBootServices, PS/2 initialization, KFS mount, RTL8139 initialization and desktop rendering. The screenshot was visually inspected.
-
-Build: https://github.com/Bobdahacker-official/KreativeOS/actions/runs/43672298346
-
-The committed formatted Rust source is the exact source produced by rustfmt and compiled in that run. The distribution bundle is the unmodified build artifact (SHA-256 listed in `dist/SHA256SUMS`).
+The distribution contains the boot image, a blank data disk, the release EFI binary, the desktop screenshot and serial logs. Its SHA-256 is in `dist/SHA256SUMS`.

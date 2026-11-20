@@ -129,6 +129,7 @@ pub struct Input {
     packet: [u8; 3],
     pos: usize,
     shift: bool,
+    control: bool,
     extended: bool,
 }
 impl Input {
@@ -137,6 +138,7 @@ impl Input {
             packet: [0; 3],
             pos: 0,
             shift: false,
+            control: false,
             extended: false,
         }
     }
@@ -175,6 +177,14 @@ impl Input {
             if b == 170 || b == 182 {
                 self.shift = false;
                 return None;
+            }
+            if b == 0x1d || b == 0x9d {
+                self.control = b == 0x1d;
+                self.extended = false;
+                return None;
+            }
+            if self.control && !self.extended && b == 0x26 {
+                return Some(Event::Key(0x84));
             }
             if b & 128 != 0 {
                 self.extended = false;
@@ -267,27 +277,63 @@ pub fn reboot() -> ! {
 
 /// Snapshot the RTC twice to avoid a date rollover; require a plausible UTC date.
 pub fn unix_time() -> Option<u64> {
-    unsafe fn read(r: u8) -> u8 { out8(0x70, r); in8(0x71) }
+    unsafe fn read(r: u8) -> u8 {
+        out8(0x70, r);
+        in8(0x71)
+    }
     unsafe fn snapshot() -> Option<[u8; 7]> {
         let start = millis();
-        while read(0x0a) & 0x80 != 0 { if millis()-start > 100 { return None; } }
-        Some([read(0),read(2),read(4),read(7),read(8),read(9),read(0x0b)])
+        while read(0x0a) & 0x80 != 0 {
+            if millis() - start > 100 {
+                return None;
+            }
+        }
+        Some([
+            read(0),
+            read(2),
+            read(4),
+            read(7),
+            read(8),
+            read(9),
+            read(0x0b),
+        ])
     }
     let mut a = unsafe { snapshot()? };
     for _ in 0..5 {
         let b = unsafe { snapshot()? };
         if a == b {
-            let cv = |v:u8| if b[6]&4 != 0 { v as u64 } else { ((v>>4)*10+(v&15)) as u64 };
-            let year=2000+cv(b[5]); let month=cv(b[4]); let day=cv(b[3]);
-            if !(2024..=2099).contains(&year)||!(1..=12).contains(&month)||!(1..=31).contains(&day){return None}
-            let leap=|y:u64|y%4==0&&(y%100!=0||y%400==0);
-            let mut days=0;for y in 1970..year {days+=if leap(y){366}else{365};}
-            let months=[31,28,31,30,31,30,31,31,30,31,30,31];
-            for m in 1..month {days+=months[m as usize-1]+if m==2&&leap(year){1}else{0};}
-            let mut hour=cv(b[2]&127);if b[6]&2==0{hour=hour%12+if b[2]&128!=0{12}else{0};}
-            return Some((days+day-1)*86400+hour*3600+cv(b[1])*60+cv(b[0]));
+            let cv = |v: u8| {
+                if b[6] & 4 != 0 {
+                    v as u64
+                } else {
+                    ((v >> 4) * 10 + (v & 15)) as u64
+                }
+            };
+            let year = 2000 + cv(b[5]);
+            let month = cv(b[4]);
+            let day = cv(b[3]);
+            if !(2024..=2099).contains(&year)
+                || !(1..=12).contains(&month)
+                || !(1..=31).contains(&day)
+            {
+                return None;
+            }
+            let leap = |y: u64| y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+            let mut days = 0;
+            for y in 1970..year {
+                days += if leap(y) { 366 } else { 365 };
+            }
+            let months = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+            for m in 1..month {
+                days += months[m as usize - 1] + if m == 2 && leap(year) { 1 } else { 0 };
+            }
+            let mut hour = cv(b[2] & 127);
+            if b[6] & 2 == 0 {
+                hour = hour % 12 + if b[2] & 128 != 0 { 12 } else { 0 };
+            }
+            return Some((days + day - 1) * 86400 + hour * 3600 + cv(b[1]) * 60 + cv(b[0]));
         }
-        a=b;
+        a = b;
     }
     None
 }

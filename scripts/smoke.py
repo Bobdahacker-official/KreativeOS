@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
 """One bounded QEMU boot check, with a captured desktop frame."""
-import json, socket, subprocess, time, pathlib, struct, zlib
+import json, select, subprocess, time, pathlib, struct, zlib
 root = pathlib.Path(__file__).resolve().parent.parent
-sock = root / 'build/qmp.sock'
-sock.unlink(missing_ok=True)
+(root / 'build/serial.log').unlink(missing_ok=True)
 p = subprocess.Popen(['bash', 'scripts/run.sh', '-display', 'none', '-qmp',
-                      f'unix:{sock},server=on,wait=off', '-no-reboot'], cwd=root)
+                      'stdio', '-no-reboot'], cwd=root, stdin=subprocess.PIPE,
+                     stdout=subprocess.PIPE, bufsize=0)
+def message():
+    if not select.select([p.stdout], [], [], 5)[0]:
+        raise TimeoutError('No QMP response')
+    line = p.stdout.readline()
+    if not line:
+        raise RuntimeError('QEMU closed QMP')
+    return json.loads(line)
 try:
     deadline = time.monotonic()+60
     log = root / 'build/serial.log'
@@ -18,16 +25,12 @@ try:
     else:
         raise RuntimeError('Desktop did not boot within 60 seconds: '+
                            (log.read_text(errors='replace') if log.exists() else 'no serial log'))
-    time.sleep(1)
-    conn = socket.socket(socket.AF_UNIX)
-    conn.settimeout(5)
-    conn.connect(str(sock))
-    f = conn.makefile('rwb', buffering=0)
-    json.loads(f.readline())
+    message()
     def command(name, args=None):
-        f.write((json.dumps({'execute':name, 'arguments':args or {}})+'\n').encode())
+        p.stdin.write((json.dumps({'execute':name, 'arguments':args or {}})+'\n').encode())
+        p.stdin.flush()
         while True:
-            msg = json.loads(f.readline())
+            msg = message()
             if 'error' in msg: raise RuntimeError(msg['error'])
             if 'return' in msg: return msg['return']
     command('qmp_capabilities')
@@ -45,7 +48,6 @@ try:
     png += chunk(b'IDAT',zlib.compress(scan))+chunk(b'IEND',b'')
     (root / 'build/desktop.png').write_bytes(png)
     print('PASS: UEFI entry, ExitBootServices, desktop and nonempty framebuffer')
-    command('quit')
 finally:
     if p.poll() is None:
         p.terminate()

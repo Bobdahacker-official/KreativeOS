@@ -44,7 +44,7 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 - Network status with real Ethernet counters, MAC address and PCI Wi-Fi device discovery.
 - Settings with three accent colors, save-all and restart.
 
-F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. The red, yellow and green buttons close, minimize and maximize or restore it. In Notes, click Save. In Browser, type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
+F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. The red, yellow and green buttons close, minimize and maximize or restore it. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
 
 ## Networking and hardware
 

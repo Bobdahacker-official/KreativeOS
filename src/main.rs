@@ -2,13 +2,13 @@
 #![no_main]
 #![allow(static_mut_refs)]
 extern crate alloc;
-mod memory;
-mod secure;
 mod boot;
 mod desktop;
 mod graphics;
 mod hardware;
+mod memory;
 mod net;
+mod secure;
 mod storage;
 mod text;
 
@@ -22,9 +22,13 @@ pub unsafe extern "efiapi" fn efi_main(image: usize, system: *mut boot::SystemTa
         graphics::init();
         hardware::init();
         storage::init();
-        let mut network = net::Network::new();
+        let network = net::Network::new();
         #[cfg(feature = "tls-smoke")]
-        secure::smoke(&mut network);
+        let network = {
+            let mut network = network;
+            secure::smoke(&mut network);
+            network
+        };
         desktop::run(screen, network);
     }
     1
