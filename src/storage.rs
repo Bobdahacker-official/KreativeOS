@@ -1,4 +1,4 @@
-//! KFS: two alternating, checksummed snapshots on a dedicated ATA disk.
+//! KFS: two alternating, checksummed snapshots on a dedicated AHCI or IDE disk.
 use crate::{hardware::*, text::Text};
 pub const COUNT: usize = 24;
 pub const CAP: usize = 2048;
@@ -25,6 +25,7 @@ impl File {
 }
 pub static mut FILES: [File; COUNT] = [File::new(); COUNT];
 pub static mut DISK: bool = false;
+static mut SATA: Option<crate::ahci::Disk> = None;
 static mut GEN: u32 = 0;
 static mut BUFFER: [u8; SNAP] = [0; SNAP];
 static mut OTHER: [u8; SNAP] = [0; SNAP];
@@ -104,6 +105,9 @@ fn snapshot_base(generation: u32) -> u32 {
 }
 
 unsafe fn read_record(base: u32, record: &mut [u8]) -> bool {
+    if let Some(disk) = &mut SATA {
+        return disk.transfer(base, record, false);
+    }
     record
         .chunks_exact_mut(512)
         .enumerate()
@@ -113,6 +117,11 @@ unsafe fn read_record(base: u32, record: &mut [u8]) -> bool {
 unsafe fn publish_record(base: u32, record: &mut [u8]) -> bool {
     let (header, body) = record.split_at_mut(512);
     // Keep the other slot readable throughout this write. Publish the header last.
+    if let Some(disk) = &mut SATA {
+        return disk.transfer(base, &mut [0; 512], true)
+            && disk.transfer(base + 1, body, true)
+            && disk.transfer(base, header, true);
+    }
     sector(base, &mut [0; 512], true)
         && body
             .chunks_exact_mut(512)
@@ -137,10 +146,14 @@ unsafe fn load(b: &[u8]) {
     }
 }
 pub unsafe fn init() {
-    // Dedicated primary-master data disk. Never formats an unrecognized nonblank disk.
-    out8(0x1f6, 0xe0);
-    let s = in8(0x1f7);
-    DISK = s != 0 && s != 255;
+    SATA = crate::ahci::discover();
+    DISK = SATA.is_some();
+    if !DISK {
+        // Legacy dedicated primary-master data disk.
+        out8(0x1f6, 0xe0);
+        let s = in8(0x1f7);
+        DISK = s != 0 && s != 255;
+    }
     if DISK {
         let read_a = read_record(SNAP_A, &mut BUFFER);
         let read_b = read_record(SNAP_B, &mut OTHER);
@@ -171,7 +184,32 @@ pub unsafe fn init() {
     if find("Readme.html").is_none() {
         let _=put("Readme.html",b"<h1>KreativeOS Browser</h1><p>This page is stored locally.</p><p>Open http://example.com for an HTTP website.</p>");
     }
+    if DISK && SATA.is_some() {
+        log(b"KreativeOS: KFS mounted through AHCI\r\n");
+    }
     log(b"KreativeOS: filesystem mounted\r\n");
+}
+
+pub fn backend() -> &'static str {
+    unsafe {
+        match (DISK, SATA.is_some()) {
+            (true, true) => "SATA / AHCI DMA",
+            (true, false) => "IDE / ATA PIO",
+            (false, true) => "AHCI volume rejected",
+            _ => "Memory only",
+        }
+    }
+}
+
+pub fn sata_details() -> Option<((u8, u8, u8), u8, u64, Text<40>)> {
+    unsafe {
+        SATA.as_ref()
+            .map(|disk| (disk.bdf, disk.port, disk.sectors, disk.model))
+    }
+}
+
+pub fn used_slots() -> usize {
+    unsafe { FILES.iter().filter(|file| file.used).count() }
 }
 
 pub fn previous_generation() -> Option<u32> {

@@ -1,4 +1,4 @@
-param([switch]$Headless)
+param([switch]$Headless, [ValidateSet('IDE', 'SATA')][string]$Storage = 'IDE')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -16,7 +16,8 @@ try {
     $build = if ($env:KREATIVE_BUILD_DIR) { $env:KREATIVE_BUILD_DIR } else { 'build' }
     $vars = Join-Path $build 'OVMF_VARS.fd'
     $disk = Join-Path $build 'KreativeOS.img'
-    $data = Join-Path $build 'KreativeOS-data.img'
+    $data = Join-Path $build $(if ($Storage -eq 'SATA') { 'KreativeOS-sata.img' } else { 'KreativeOS-data.img' })
+    if ($env:KREATIVE_DATA_IMAGE) { $data = $env:KREATIVE_DATA_IMAGE }
     $serial = Join-Path $build 'serial.log'
     foreach ($file in @($code, $template, $disk, $data)) {
         if (-not (Test-Path -LiteralPath $file)) { throw "Missing $file. Build first and verify your OVMF paths." }
@@ -29,11 +30,16 @@ try {
         '-drive', "if=pflash,format=raw,file=$vars",
         '-drive', "if=none,id=kos,format=raw,file=$disk",
         '-device', 'virtio-blk-pci,drive=kos,bootindex=1',
-        '-drive', "if=ide,index=0,format=raw,file=$data",
         '-device', "$nic,netdev=net0", '-netdev', 'user,id=net0',
         '-vga', 'std', '-serial', "file:$serial",
         '-audiodev', 'none,id=kos_audio', '-device', 'AC97,audiodev=kos_audio'
     )
+    if ($Storage -eq 'SATA') {
+        $options += @('-device', 'ich9-ahci,id=kossata', '-drive', "if=none,id=kosdata,format=raw,file=$data",
+                      '-device', 'ide-hd,drive=kosdata,bus=kossata.0')
+    } else {
+        $options += @('-drive', "if=ide,index=0,format=raw,file=$data")
+    }
     if ($Headless) { $options += @('-display', 'none', '-no-reboot') }
     & $qemu @options
     if ($LASTEXITCODE -ne 0) { throw "QEMU exited with code $LASTEXITCODE." }

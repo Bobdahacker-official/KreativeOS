@@ -2,6 +2,7 @@
 #![no_main]
 #![allow(static_mut_refs)]
 extern crate alloc;
+mod ahci;
 mod archive;
 mod audio;
 mod ax210;
@@ -16,6 +17,7 @@ mod e1000;
 mod ethernet;
 mod graphics;
 mod hardware;
+mod hardware_center;
 mod memory;
 mod net;
 mod organizer;

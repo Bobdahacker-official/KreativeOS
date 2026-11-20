@@ -17,7 +17,7 @@ rustup target add x86_64-unknown-uefi
 bash scripts/build.sh
 ```
 
-The build produces `build/KreativeOS.img`, a 64 MiB partitioned UEFI boot disk, `build/esp/EFI/BOOT/BOOTX64.EFI`, and a separate 8 MiB data disk. An existing data disk is preserved on rebuild.
+The build produces `build/KreativeOS.img`, a 64 MiB partitioned UEFI boot disk, `build/esp/EFI/BOOT/BOOTX64.EFI`, and separate 8 MiB IDE and SATA data images. Existing data images are preserved on rebuild.
 
 For QEMU, install `qemu-system-x86` and `ovmf`, then run:
 
@@ -35,13 +35,15 @@ rustup target add x86_64-unknown-uefi
 
 The headless launch writes serial output to `build/serial.log`. Omit `-Headless` to open the desktop. Set `KREATIVE_PYTHON` or `KREATIVE_QEMU` to the executable path if automatic discovery fails.
 
+Use `.\scripts\run.ps1 -Storage SATA -Headless` on Windows or `STORAGE=sata bash scripts/run.sh -display none` on Linux to use the native AHCI driver. Both commands attach the same type of data image used by the bare-metal driver.
+
 Set `OVMF_CODE` and `OVMF_VARS` if your firmware files use different paths. The supplied machine uses 256 MiB RAM, standard VGA, PS/2 input, RTL8139 Ethernet, a VirtIO boot disk (read by UEFI), and an IDE primary-master data disk. The operating system contains no Linux components; Linux, macOS or Windows can be used as a build host.
 
 GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and checks HTTPS against local TLS servers. It uploads the images, serial logs and desktop screenshot as `KreativeOS-x86_64`.
 
 ## Desktop
 
-- tiny-skia vector icons, a composited pointer, antialiased Open Sans, an aurora wallpaper, and a two-column app launcher. Click 1–4 at the top right to switch workspaces. Windows support dragging, minimizing, maximizing and closing.
+- tiny-skia vector icons, a composited pointer, antialiased Open Sans, an aurora wallpaper, and a three-column app launcher with workspace search. Click 1–4 at the top right to switch workspaces. Windows support dragging, minimizing, maximizing and closing.
 - PS/2 keyboard, standard PS/2 mice, and IntelliMouse-compatible scroll wheels.
 - Files and Notes with a persistent, checksummed, two-snapshot KFS volume.
 - Terminal with file operations, app launching, network status, calculation and reboot.
@@ -53,6 +55,7 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 - Two-player Tic Tac Toe with turn management, win detection and restart.
 - Local KAPP1 document packages, installation persistence and a launcher entry.
 - Separate Ethernet and ESP-AT Wi-Fi panels. Ethernet shows link speed, the active IPv4 configuration and remaining DHCP lease time, and saves automatic or manual profiles with a VLAN setting.
+- Hardware Center shows the processor, active storage and Ethernet drivers, a searchable PCI inventory, and KFS usage. Use **Save report** to export the inventory to `Hardware.txt`.
 - Settings with three accent colors, save-all and restart.
 
 F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
@@ -89,7 +92,19 @@ The gallery reads up to 36 imported images from packs totaling 6 MiB. Each image
 
 ## Files and packages
 
-KFS has 24 file entries, 32-byte ASCII names and 2 KiB per file. It stores snapshots in sectors 2048–2247 of the dedicated primary-master ATA disk, committing the header last. Unrecognized nonblank KFS regions are not formatted. A missing disk leaves files available in memory, and Save reports that state.
+KFS has 24 file entries, 32-byte ASCII names and 2 KiB per file. It stores snapshots in sectors 2048–2247, committing the header last. KreativeOS prefers a marked AHCI SATA volume and also supports a dedicated legacy primary-master ATA disk. Unrecognized nonblank KFS snapshots are rejected. A missing disk leaves files available in memory, and Save reports that state.
+
+### SATA media and migration
+
+Build first to create `build/KreativeOS-sata.img`. For a physical PC, use UEFI boot and an AHCI controller in firmware settings. Write the boot and SATA data images to **separate dedicated media**. The AHCI driver requires a directly attached disk with 512-byte logical sectors. A marked disk can be larger than the image. The driver checks the marker and a blank sector 0 before selecting it, and its writes are limited to KFS snapshot and draft sectors.
+
+To copy legacy files and accounts to a new SATA image while keeping the original image:
+
+```sh
+python scripts/sata_image.py build/migrated-sata.img --from-ide build/KreativeOS-data.img
+```
+
+Set `KREATIVE_DATA_IMAGE` to the new image and select the SATA launch profile. The migration script refuses to overwrite an existing output file. See [hardware research](docs/hardware.md) for the driver design and compatibility boundaries.
 
 Terminal examples:
 

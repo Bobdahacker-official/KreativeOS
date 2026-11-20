@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One bounded QEMU boot check, with a captured desktop frame."""
-import json, select, subprocess, time, pathlib, struct, zlib
+import json, os, select, subprocess, time, pathlib, struct, zlib
 root = pathlib.Path(__file__).resolve().parent.parent
 (root / 'build/serial.log').unlink(missing_ok=True)
 p = subprocess.Popen(['bash', 'scripts/run.sh', '-display', 'none', '-qmp',
@@ -25,6 +25,8 @@ try:
     else:
         raise RuntimeError('Desktop did not boot within 60 seconds: '+
                            (log.read_text(errors='replace') if log.exists() else 'no serial log'))
+    if os.environ.get('STORAGE') == 'sata':
+        assert b'KFS mounted through AHCI' in log.read_bytes(), 'SATA profile did not mount KFS through AHCI'
     message()
     def command(name, args=None):
         p.stdin.write((json.dumps({'execute':name, 'arguments':args or {}})+'\n').encode())

@@ -11,7 +11,7 @@ pub(crate) const INK: u32 = 0x20363a;
 pub(crate) const MUTED: u32 = 0x566a69;
 const PANEL: u32 = 0xf4f5ed;
 pub(crate) const SURFACE: u32 = 0xe5ebe0;
-const NAMES: [&str; 14] = [
+const NAMES: [&str; 15] = [
     "Files",
     "Notes",
     "Terminal",
@@ -26,12 +26,35 @@ const NAMES: [&str; 14] = [
     "Kreative Guide",
     "Images",
     "Organizer",
+    "Hardware Center",
 ];
 const GUIDE: usize = 11;
 const IMAGES: usize = 12;
 const ORGANIZER: usize = 13;
+const HARDWARE_CENTER: usize = 14;
 const APP_COUNT: usize = NAMES.len();
 const BAR: i32 = 54;
+const LAUNCHER_WIDTH: i32 = 530;
+const LAUNCHER_HEIGHT: i32 = 340;
+const LAUNCHER_CARD: i32 = 168;
+const LAUNCHER_ROW: i32 = 47;
+const APP_GROUPS: [&str; APP_COUNT] = [
+    "Storage",
+    "Writing",
+    "Development",
+    "Web",
+    "Utilities",
+    "Creative",
+    "Games",
+    "Software",
+    "Connectivity",
+    "Preferences",
+    "Games",
+    "Documentation",
+    "Creative",
+    "Productivity",
+    "Diagnostics",
+];
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WebJob {
     Page,
@@ -219,6 +242,7 @@ struct Desktop {
     images: Catalog,
     organizer: crate::organizer::Organizer,
     users: crate::users::Session,
+    hardware_center: crate::hardware_center::Center,
 }
 impl Desktop {
     fn new(w: usize, h: usize) -> Self {
@@ -302,6 +326,7 @@ impl Desktop {
             images: Catalog::new(),
             organizer: crate::organizer::Organizer::new(),
             users: crate::users::Session::new(),
+            hardware_center: crate::hardware_center::Center::new(),
             ethernet: crate::ethernet::Editor::new(),
             ethernet_tab: true,
         };
@@ -369,6 +394,9 @@ impl Desktop {
         d
     }
     fn open(&mut self, id: usize) {
+        if id == HARDWARE_CENTER && !self.windows[id].open {
+            self.hardware_center.refresh();
+        }
         self.search = None;
         if self.windows[id].open {
             self.workspace = self.window_workspace[id];
@@ -410,6 +438,8 @@ impl Desktop {
             if (index != GUIDE || self.installed)
                 && (matches(label)
                     || (index == ORGANIZER && matches("calendar contacts"))
+                    || (index == HARDWARE_CENTER
+                        && matches("pci sata disk devices drivers diagnostics"))
                     || (index == 9 && matches("display input appearance settings power")))
             {
                 let mut text = Text::new();
@@ -1105,6 +1135,9 @@ impl Desktop {
                 _ => {}
             },
             ORGANIZER => self.organizer.key(key),
+            HARDWARE_CENTER => self
+                .hardware_center
+                .key(key, self.windows[HARDWARE_CENTER].h),
             _ => (),
         }
     }
@@ -1283,6 +1316,10 @@ impl Desktop {
                             (self.scroll + wheel.unsigned_abs() as usize * 100).min(self.page.len)
                     }
                     IMAGES => self.step_image(if wheel > 0 { -1 } else { 1 }),
+                    HARDWARE_CENTER => self.hardware_center.scroll(
+                        if wheel > 0 { -1 } else { 1 },
+                        crate::hardware_center::listing_rows(focused.h),
+                    ),
                     _ => {}
                 }
             }
@@ -1388,15 +1425,22 @@ impl Desktop {
                 return;
             }
             if self.menu {
-                let top = s.h as i32 - BAR - 406;
-                if (18..414).contains(&x) && y >= top + 58 && y < top + 394 {
-                    let row = ((y - top - 58) / 48) as usize;
-                    let column = ((x - 18) / 198) as usize;
-                    let id = row * 2 + column;
+                let top = s.h as i32 - BAR - LAUNCHER_HEIGHT;
+                if (28..LAUNCHER_WIDTH - 2).contains(&x)
+                    && (top + 77..top + 77 + 5 * LAUNCHER_ROW).contains(&y)
+                {
+                    let row = ((y - top - 77) / LAUNCHER_ROW) as usize;
+                    let column = ((x - 28) / LAUNCHER_CARD) as usize;
+                    let id = row * 3 + column;
                     if id < APP_COUNT && (id != GUIDE || self.installed) {
                         self.open(id);
                         return;
                     }
+                }
+                if (366..520).contains(&x) && (top + 19..top + 53).contains(&y) {
+                    self.search = Some(Text::new());
+                    self.overview = false;
+                    self.search_row = 0;
                 }
                 self.menu = false;
                 return;
@@ -1474,6 +1518,10 @@ impl Desktop {
     fn app_click(&mut self, id: usize, x: i32, y: i32, n: &mut Network) {
         match id {
             ORGANIZER => self.organizer.click(x, y),
+            HARDWARE_CENTER => {
+                self.hardware_center
+                    .click(x, y, self.windows[id].w, self.windows[id].h, n)
+            }
             0 => {
                 if x < 142 && (89..159).contains(&y) {
                     self.file_images = y >= 124;
@@ -1715,7 +1763,7 @@ impl Desktop {
         }
         s.theme = self.theme;
         s.rounded(14, 8, 130, 32, 8, 0x1c2c3c, 255);
-        s.symbol(24, 14, 14, 0x87e3d1);
+        s.symbol(24, 14, 15, 0x87e3d1);
         s.text(51, 15, "KreativeOS", 0xf1f7fa, 1);
         for (i, label) in ["1", "2", "3", "4"].iter().enumerate() {
             let xx = w - 194 + i as i32 * 44;
@@ -1758,7 +1806,7 @@ impl Desktop {
             if self.menu { 0x417278 } else { 0x26394e },
             255,
         );
-        s.symbol(22, bar_y + 16, 14, 0xe4f5ea);
+        s.symbol(22, bar_y + 16, 15, 0xe4f5ea);
         s.centered(41, bar_y + 8, 68, 38, "Apps", 0xe4f5ea, 1);
         let step = task_width(w);
         for (slot, id) in self.task_ids().enumerate() {
@@ -1840,29 +1888,47 @@ impl Desktop {
         }
 
         if self.menu {
-            let top = bar_y - 406;
-            s.shadow(12, top, 408, 398);
-            s.rounded(12, top, 408, 398, 9, PANEL, 255);
-            s.text(29, top + 18, "Applications", INK, 3);
+            let top = bar_y - LAUNCHER_HEIGHT;
+            s.shadow(12, top, LAUNCHER_WIDTH, LAUNCHER_HEIGHT - 8);
+            s.rounded(
+                12,
+                top,
+                LAUNCHER_WIDTH,
+                LAUNCHER_HEIGHT - 8,
+                14,
+                0x17263a,
+                255,
+            );
+            s.text(28, top + 18, "Applications", 0xf2f8fb, 2);
+            s.text(
+                29,
+                top + 47,
+                "Open an app in the current workspace",
+                0xa8c4d3,
+                1,
+            );
+            s.rounded(366, top + 19, 154, 34, 6, 0x304961, 255);
+            s.centered(366, top + 19, 154, 34, "Search workspace", 0xeaf7fa, 1);
             for (id, label) in NAMES.iter().enumerate() {
                 if id == GUIDE && !self.installed {
                     continue;
                 }
-                let left = 18 + (id % 2) as i32 * 198;
-                let row = top + 58 + (id / 2) as i32 * 48;
-                let over =
-                    (left..left + 198).contains(&self.mx) && (row..row + 48).contains(&self.my);
+                let left = 28 + (id % 3) as i32 * LAUNCHER_CARD;
+                let row = top + 77 + (id / 3) as i32 * LAUNCHER_ROW;
+                let over = (left..left + LAUNCHER_CARD - 8).contains(&self.mx)
+                    && (row..row + 42).contains(&self.my);
                 s.rounded(
-                    left + 4,
-                    row + 3,
-                    190,
+                    left,
+                    row,
+                    LAUNCHER_CARD - 8,
                     42,
-                    6,
-                    if over { 0xd2e6d8 } else { 0xe9eee5 },
+                    8,
+                    if over { 0x36546a } else { 0x243950 },
                     255,
                 );
-                s.symbol(left + 15, row + 14, id, 0x246455);
-                s.centered(left + 43, row + 3, 139, 42, label, INK, 1);
+                s.symbol(left + 9, row + 11, id, 0x8cddc7);
+                s.text(left + 36, row + 3, clip_label(label, 117, 1), 0xebf5fa, 1);
+                s.text(left + 36, row + 22, APP_GROUPS[id], 0xa7c6d7, 1);
             }
         }
         s.theme = 0;
@@ -2043,6 +2109,7 @@ impl Desktop {
         let clip = s.clip_rect(x + 1, y + 38, w - 2, h - 39);
         match id {
             ORGANIZER => self.organizer.draw(s, x, y, w, self.accent),
+            HARDWARE_CENTER => self.hardware_center.draw(s, x, y, w, h, n, self.accent),
             0 => {
                 s.rect(x + 1, y + 39, 142, h - 54, 0xe7ede2);
                 s.text(x + 18, y + 59, "Locations", MUTED, 1);

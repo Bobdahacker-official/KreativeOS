@@ -12,11 +12,17 @@ serial2=()
 if [ -n "${ESP_AT_SERIAL:-}" ]; then
   serial2=(-serial "$ESP_AT_SERIAL")
 fi
+case "${STORAGE:-ide}" in
+  ide) data=(-drive "if=ide,index=0,format=raw,file=${KREATIVE_DATA_IMAGE:-build/KreativeOS-data.img}") ;;
+  sata) data=(-device ich9-ahci,id=kossata -drive "if=none,id=kosdata,format=raw,file=${KREATIVE_DATA_IMAGE:-build/KreativeOS-sata.img}"
+    -device ide-hd,drive=kosdata,bus=kossata.0) ;;
+  *) echo 'Set STORAGE to ide or sata' >&2; exit 2 ;;
+esac
 exec qemu-system-x86_64 -machine pc -cpu max -m 256 \
   -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
   -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
   -drive if=none,id=kos,format=raw,file="${BOOT_IMAGE:-build/KreativeOS.img}" \
   -device virtio-blk-pci,drive=kos,bootindex=1 \
-  -drive if=ide,index=0,format=raw,file=build/KreativeOS-data.img \
+  "${data[@]}" \
   -device "${NIC_MODEL:-rtl8139},netdev=net0" -netdev user,id=net0 \
   -vga std -serial "file:${SERIAL_LOG:-build/serial.log}" "${serial2[@]}" "${audio[@]}" "$@"

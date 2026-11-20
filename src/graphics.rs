@@ -3,7 +3,7 @@ use tiny_skia::{
     FillRule, FilterQuality, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke,
     Transform,
 };
-static mut SYMBOLS: [[u8; 400]; 15] = [[0; 400]; 15];
+static mut SYMBOLS: [[u8; 400]; 16] = [[0; 400]; 16];
 static mut POINTER: Option<Pixmap> = None;
 static mut IMAGE_CACHE: Vec<(usize, i32, i32, Pixmap)> = Vec::new();
 
@@ -468,7 +468,7 @@ impl Screen {
 
     /// Each mark uses the same 20x20 grid and two-pixel stroke.
     pub fn symbol(&mut self, x: i32, y: i32, id: usize, c: u32) {
-        for (i, a) in unsafe { SYMBOLS[id.min(14)] }.iter().enumerate() {
+        for (i, a) in unsafe { SYMBOLS[id.min(15)] }.iter().enumerate() {
             self.blend(x + (i % 20) as i32, y + (i / 20) as i32, c, *a as u32);
         }
     }
@@ -618,6 +618,18 @@ impl Screen {
 
 fn symbol_paths(id: usize) -> &'static [&'static [(i32, i32)]] {
     match id {
+        14 => &[
+            &[(5, 5), (15, 5), (15, 15), (5, 15), (5, 5)],
+            &[(8, 8), (12, 8), (12, 12), (8, 12), (8, 8)],
+            &[(2, 8), (5, 8)],
+            &[(2, 12), (5, 12)],
+            &[(15, 8), (18, 8)],
+            &[(15, 12), (18, 12)],
+            &[(8, 2), (8, 5)],
+            &[(12, 2), (12, 5)],
+            &[(8, 15), (8, 18)],
+            &[(12, 15), (12, 18)],
+        ],
         13 => &[
             &[(3, 5), (17, 5), (17, 17), (3, 17), (3, 5)],
             &[(7, 2), (7, 7)],

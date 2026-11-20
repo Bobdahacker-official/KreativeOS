@@ -149,6 +149,10 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
         return None;
     }
     crate::net::DMA = dma as usize;
+    let mut sata_dma = 0xffff_ffffu64;
+    if (bs.allocate_pages)(1, 2, crate::ahci::PAGES, &mut sata_dma) == 0 {
+        crate::ahci::DMA = sata_dma as usize;
+    }
     let mut audio_dma = 0xffff_ffffu64;
     if (bs.allocate_pages)(1, 2, crate::audio::DMA_SIZE / 4096, &mut audio_dma) == 0 {
         crate::audio::DMA = audio_dma as usize;
