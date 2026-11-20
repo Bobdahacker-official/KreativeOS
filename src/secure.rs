@@ -1,6 +1,6 @@
 //! TLS 1.3 transport. Chain, hostname, validity and handshake signatures are mandatory.
 use alloc::vec::Vec;
-use embedded_tls::{blocking::TlsConnection, Aes128GcmSha256, TlsConfig, TlsContext, TlsError, CryptoProvider, TlsVerifier, CertificateRef, CertificateEntryRef, CertificateVerifyRef};
+use embedded_tls::blocking::{TlsConnection, Aes128GcmSha256, TlsConfig, TlsContext, TlsError, CryptoProvider, TlsVerifier, CertificateRef, CertificateEntryRef, CertificateVerifyRef};
 use rand_core::{RngCore, CryptoRng};
 use rustls_pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Sha256, Digest};
@@ -16,7 +16,7 @@ fn random(bytes:&mut [u8])->Result<(),getrandom::Error>{
     }Ok(())
 }
 getrandom::register_custom_getrandom!(random);
-pub fn entropy_available()->bool{unsafe{core::arch::x86_64::__cpuid(1).ecx&(1<<30)!=0}}
+pub fn entropy_available()->bool{core::arch::x86_64::__cpuid(1).ecx&(1<<30)!=0}
 struct Random;
 impl CryptoRng for Random{}
 impl RngCore for Random {
@@ -39,9 +39,11 @@ impl TlsVerifier<Aes128GcmSha256> for Verifier {
         let chain:Vec<_>=cert.entries.iter().skip(1).filter_map(|e|match e{CertificateEntryRef::X509(v)=>Some(CertificateDer::from(*v)),_=>None}).collect();
         let provider=rustls_rustcrypto::provider();
         let now=hardware::unix_time().ok_or(TlsError::InvalidCertificate)?;
-        let mut roots=webpki_roots::TLS_SERVER_ROOTS.to_vec();
+        #[cfg(not(feature="tls-smoke"))]
+        let roots=webpki_roots::TLS_SERVER_ROOTS;
         #[cfg(feature="tls-smoke")]
-        {let ca=CertificateDer::from(include_bytes!("../build/tls-test/ca.der").as_slice());roots.push(webpki::anchor_from_trusted_cert(&ca).map_err(|_|TlsError::InvalidCertificate)?.to_owned());}
+        let roots={let mut roots=webpki_roots::TLS_SERVER_ROOTS.to_vec();let ca=CertificateDer::from(include_bytes!("../build/tls-test/ca.der").as_slice());roots.push(webpki::anchor_from_trusted_cert(&ca).map_err(|_|TlsError::InvalidCertificate)?.to_owned());roots};
+
         ee.verify_for_usage(provider.signature_verification_algorithms.all,&roots,&chain,UnixTime::since_unix_epoch(core::time::Duration::from_secs(now)),webpki::KeyUsage::server_auth(),None,None).map_err(|e|{diagnostic("Certificate",&e);TlsError::InvalidCertificate})?;
         let host=ServerName::try_from(self.host.str()).map_err(|_|TlsError::InvalidCertificate)?;
         ee.verify_is_valid_for_subject_name(&host).map_err(|e|{diagnostic("Hostname",&e);TlsError::InvalidCertificate})?;
@@ -55,7 +57,7 @@ impl TlsVerifier<Aes128GcmSha256> for Verifier {
         // Only TLS 1.3 CertificateVerify signature schemes are permitted.
         if ![0x0403,0x0503,0x0804,0x0805,0x0806,0x0807].contains(&scheme){return Err(TlsError::InvalidCertificate)}
         for (id,algorithms) in provider.signature_verification_algorithms.mapping {
-            if *id as u16==scheme {for alg in *algorithms {if ee.verify_signature(*alg,&msg,v.signature).is_ok(){return Ok(())}}}
+            if u16::from(*id)==scheme {for alg in *algorithms {if ee.verify_signature(*alg,&msg,v.signature).is_ok(){return Ok(())}}}
         }
         Err(TlsError::InvalidCertificate)
     }
@@ -67,17 +69,16 @@ impl CryptoProvider for Provider {
  fn rng(&mut self)->impl rand_core::CryptoRngCore{&mut self.rng}
  fn verifier(&mut self)->Result<&mut impl TlsVerifier<Self::CipherSuite>,TlsError>{Ok(&mut self.verifier)}
 }
-#[derive(Debug)]pub struct IoError;
-impl embedded_io::Error for IoError{fn kind(&self)->embedded_io::ErrorKind{embedded_io::ErrorKind::TimedOut}}
+type IoError = embedded_io::ErrorKind;
 pub struct Socket<'a>(pub &'a mut Network);
 impl embedded_io::ErrorType for Socket<'_>{type Error=IoError;}
 impl embedded_io::Read for Socket<'_>{fn read(&mut self,b:&mut [u8])->Result<usize,IoError>{
  if b.is_empty(){return Ok(0)}let start=hardware::millis();
- loop{self.0.poll();let count=b.len().min(self.0.raw.len());if count>0{for v in &mut b[..count]{*v=self.0.raw.pop_front().unwrap()}return Ok(count)}if self.0.raw_eof{return Ok(0)}if self.0.state!=6||hardware::millis()-start>15000{return Err(IoError)}core::hint::spin_loop()}
+ loop{self.0.poll();let count=b.len().min(self.0.raw.len());if count>0{for v in &mut b[..count]{*v=self.0.raw.pop_front().unwrap()}return Ok(count)}if self.0.raw_eof{return Ok(0)}if self.0.state!=6||hardware::millis()-start>15000{return Err(IoError::TimedOut)}core::hint::spin_loop()}
 }}
 impl embedded_io::Write for Socket<'_>{fn write(&mut self,b:&[u8])->Result<usize,IoError>{
  let n=b.len().min(1200);if n==0{return Ok(0)}self.0.raw_send(&b[..n]);let start=hardware::millis();
- while self.0.raw_waiting{self.0.poll();if self.0.state!=6||hardware::millis()-start>10000{return Err(IoError)}}Ok(n)
+ while self.0.raw_waiting{self.0.poll();if self.0.state!=6||hardware::millis()-start>10000{return Err(IoError::TimedOut)}}Ok(n)
 }fn flush(&mut self)->Result<(),IoError>{Ok(())}}
 pub fn fetch(n:&mut Network){
  n.tls_pending=false;n.body.clear();

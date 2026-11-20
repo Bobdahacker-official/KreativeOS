@@ -1,6 +1,6 @@
 # KreativeOS
 
-KreativeOS is an independent x86-64 operating system written from scratch in Rust. It boots through UEFI, exits firmware boot services, and runs its own graphical desktop, input drivers, disk storage and Ethernet stack. It does not use a Linux kernel, a host operating system, or external Rust crates.
+KreativeOS is an independent x86-64 operating system written from scratch in Rust. It boots through UEFI, exits firmware boot services, and runs its own graphical desktop, input drivers, disk storage and Ethernet stack. It does not use a Linux kernel, a host operating system, while using Rust libraries for TLS and certificate validation.
 
 ## Download
 
@@ -31,11 +31,11 @@ GitHub Actions compiles the Rust binary, creates the disk image, boots it once a
 
 ## Desktop
 
-- Custom framebuffer composition, gradient wallpaper, window shadows, taskbar, launcher, focus, dragging, minimizing and closing.
+- Antialiased Open Sans, layered gradient wallpaper, rounded windows, a translucent dock, and a grid launcher. Windows support dragging, minimizing, maximizing and closing.
 - PS/2 keyboard and three-byte PS/2 mouse packets.
 - Files and Notes with a persistent, checksummed, two-snapshot KFS volume.
 - Terminal with file operations, app launching, network status, calculation and reboot.
-- HTTP browser with DNS resolution, TCP requests, HTML-to-text rendering, local HTML documents and scrolling.
+- HTTP and HTTPS browser with DNS resolution, TCP requests, HTML-to-text rendering, local HTML documents and scrolling.
 - Calculator with checked integer arithmetic, operator precedence and parentheses.
 - Paint with a color palette, continuous strokes and clear canvas.
 - Snake with food, scoring, self-collision, wall collision and restart.
@@ -44,13 +44,13 @@ GitHub Actions compiles the Rust binary, creates the disk image, boots it once a
 - Network status with real Ethernet counters, MAC address and PCI Wi-Fi device discovery.
 - Settings with three accent colors, save-all and restart.
 
-F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Click a title bar to drag, `_` to minimize, or `X` to close. In Notes, click Save. In Browser, type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
+F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. The red, yellow and green buttons close, minimize and maximize or restore it. In Notes, click Save. In Browser, type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
 
 ## Networking and hardware
 
 The supplied configuration uses QEMU user networking: IPv4 `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`. The Ethernet driver targets PCI RTL8139 with 32-bit DMA allocations. The stack implements Ethernet, ARP, IPv4 validation, UDP DNS lookup and a single bounded TCP/HTTP connection with retransmission and timeout handling.
 
-Open `http://example.com/` in Browser or `file:Readme.html` for the bundled local document. Browser output is text, capped at 12 KiB. HTTP uses port 80 and HTTP/1.0 connection-close semantics. HTTPS/TLS, JavaScript, CSS layout, DHCP and Wi-Fi radio association are not implemented. Wi-Fi devices are counted through PCI discovery; the Network app reports driver availability accurately.
+Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. Browser output is text, capped at 12 KiB. HTTP uses port 80 and HTTP/1.0 connection-close semantics. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. JavaScript, CSS layout, DHCP and Wi-Fi radio association are not implemented. Wi-Fi devices are counted through PCI discovery; the Network app reports driver availability accurately.
 
 The kernel is a single-address-space system with a cooperative app event loop and polled drivers. It currently uses firmware-established CPU mappings. USB input, audio, process isolation, SMP and general-purpose native executable loading are not implemented. Paint content stays in memory. KAPP packages contain document apps, not native machine code.
 

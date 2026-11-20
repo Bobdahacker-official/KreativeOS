@@ -594,7 +594,7 @@ impl Desktop {
         s.tint(0,0,w,32,0xf5efff,145);
         s.text(20,6,"K",0x33364e,2);s.text(48,6,"KreativeOS",0x33364e,2);
         s.text(160,7,if self.focus<11{NAMES[self.focus]}else{"Guide"},0x4c4964,1);
-        s.text(250,7,"File    Edit    View    Window",0x4c4964,1);
+
         let (hh,mm,_)=hardware::clock();let mut time:Text<32>=Text::new();let _=write!(time,"{:02}:{:02}",hh,mm);
         s.text(w-62,7,time.str(),0x3b3d55,1);s.text(w-157,7,if n.io!=0{"Ethernet"}else{"Offline"},0x3b3d55,1);
         for &id in &self.order {let a=self.windows[id];if a.open&&!a.min{self.window(s,n,id,a)}}
@@ -606,7 +606,7 @@ impl Desktop {
             if slot>0&&self.windows[id].open{s.circle(x+27,dock_y+64,2,0x52516e)}
             if hover{let label=if slot==0{"Applications"}else{NAMES[id]};let tw=crate::graphics::text_width(label,1);s.rounded(x+27-tw/2-10,dock_y-32,tw+20,25,8,0xf9f8ff,235);s.text(x+27-tw/2,dock_y-28,label,INK,1);}
         }
-        if self.menu {let left=(w-640)/2;let top=(h-450)/2;s.shadow(left,top,640,420);s.rounded(left,top,640,420,22,0xf8f7ff,242);s.text(left+30,top+25,"Your applications",INK,3);s.text(left+360,top+32,"A place for everything.",MUTED,1);
+        if self.menu {let left=(w-640)/2;let top=(h-450)/2;s.shadow(left,top,640,420);s.rounded(left,top,640,420,22,0xf8f7ff,242);s.text(left+30,top+25,"Your applications",INK,3);
             for id in 0..12 {if id==11&&!self.installed{continue}let x=left+24+(id%4)as i32*148;let y=top+80+(id/4)as i32*110;s.icon(x+48,y,id,48);let label=if id<11{NAMES[id]}else{"Kreative Guide"};let tw=crate::graphics::text_width(label,1);s.text(x+72-tw/2,y+58,label,INK,1);}}
         s.cursor(self.mx,self.my);
     }
@@ -623,7 +623,7 @@ impl Desktop {
         match id {
             0=>{
                 s.rect(x+1,y+39,142,h-54,0xebedf6);s.text(x+18,y+59,"Favorites",MUTED,1);
-                for (row,label) in ["Recents","Documents","Downloads","Applications"].iter().enumerate(){let yy=y+92+row as i32*36;if row==1{s.rounded(x+9,yy-5,126,30,7,0xd7ddf4,255)}s.text(x+22,yy,label,if row==1{0x4d63ae}else{0x6c7287},1);}
+                for (row,label) in ["Documents"].iter().enumerate(){let yy=y+92+row as i32*36;if row==0{s.rounded(x+9,yy-5,126,30,7,0xd7ddf4,255)}s.text(x+22,yy,label,if row==0{0x4d63ae}else{0x6c7287},1);}
                 s.text(x+164,y+58,"Documents",INK,3);s.text(x+165,y+88,"Your local workspace",MUTED,1);
                 let mut row=0;unsafe{for f in &storage::FILES{if f.used{let yy=y+128+row*42;if yy+30>y+h{break}s.rounded(x+163,yy-2,w-180,36,7,if row%2==0{0xffffff}else{PANEL},255);s.rounded(x+173,yy+3,16,21,3,0xdce5f8,255);s.text(x+200,yy+1,f.name.str(),INK,1);row+=1;}}}
                 s.text(x+18,y+h-38,"On this computer",MUTED,1);
