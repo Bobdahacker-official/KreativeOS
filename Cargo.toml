@@ -23,11 +23,11 @@ rustls-rustcrypto = { version = "=0.0.2-alpha", default-features = false, featur
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["alloc"] }
 rustls-pki-types = { version = "1", default-features = false, features = ["alloc"] }
 webpki-roots = "1"
-sha2 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 ed25519-dalek = { version = "2.2", default-features = false }
 linked_list_allocator = "0.10"
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 zune-core = { version = "0.5", default-features = false }
-zune-png = { version = "=0.5.2", default-features = false }
+nopng = "=0.3.0"
 zune-jpeg = { version = "0.5", default-features = false }
 tiny-skia = { version = "=0.12.0", default-features = false, features = ["no-std-float"] }

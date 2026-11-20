@@ -190,6 +190,13 @@ struct Entry {
     len: usize,
     contiguous: bool,
     managed: bool,
+    directory: bool,
+}
+
+struct Parent {
+    chain: Vec<u32>,
+    offset: usize,
+    contiguous: bool,
 }
 
 pub struct Volume {
@@ -199,7 +206,9 @@ pub struct Volume {
     bitmap: Vec<u8>,
     bitmap_chain: Vec<u32>,
     metadata: Vec<u32>,
-    tracked: Vec<crate::text::Text<{ storage::DISK_NAME_CAP }>>,
+    tracked: Vec<crate::text::Text<{ storage::PATH_CAP }>>,
+    folders: Vec<crate::text::Text<{ storage::PATH_CAP }>>,
+    parent: Option<Parent>,
     healthy: bool,
 }
 
@@ -318,6 +327,8 @@ impl Volume {
             bitmap_chain,
             metadata,
             tracked: Vec::new(),
+            folders: Vec::new(),
+            parent: None,
             healthy: true,
         };
         if !volume.metadata.iter().all(|&id| volume.allocated(id)) {
@@ -420,6 +431,7 @@ impl Volume {
             } else {
                 storage::CAP
             };
+            let directory = word(entry, 4) & 0x10 != 0;
             let managed = word(entry, 4) & 0x11 == 0
                 && size <= max as u64
                 && qword(set, 40) == size
@@ -432,9 +444,10 @@ impl Volume {
                 name,
                 offset,
                 cluster,
-                len: size.min(max as u64) as usize,
+                len: size.min(if directory { 512 * 1024 } else { max } as u64 + 1) as usize,
                 contiguous,
                 managed,
+                directory,
             });
             offset = end;
         }
@@ -448,38 +461,215 @@ impl Volume {
         if entry.len == 0 {
             return true;
         }
-        let mut block = alloc::vec![0; self.geometry.sector];
-        for (index, target) in data[..entry.len]
-            .chunks_mut(self.geometry.sector)
-            .enumerate()
-        {
-            if !storage::blocks(self.geometry.mapped(&chain, index), &mut block, false) {
+        let cluster = self.geometry.cluster_bytes();
+        let mut tail = alloc::vec![0; self.geometry.sector];
+        for (&id, target) in chain.iter().zip(data[..entry.len].chunks_mut(cluster)) {
+            let aligned = target.len() / self.geometry.sector * self.geometry.sector;
+            let start = self.geometry.lba(id);
+            if aligned != 0 && !storage::blocks(start, &mut target[..aligned], false) {
                 return false;
             }
-            target.copy_from_slice(&block[..target.len()]);
+            if aligned < target.len() {
+                if !storage::blocks(
+                    start + (aligned / self.geometry.sector) as u64,
+                    &mut tail,
+                    false,
+                ) {
+                    return false;
+                }
+                let remainder = &mut target[aligned..];
+                remainder.copy_from_slice(&tail[..remainder.len()]);
+            }
         }
         true
     }
 
-    pub fn load(&mut self, files: &mut [File]) -> bool {
-        let Some(mut entries) = self.entries() else {
+    fn in_child<R>(&mut self, entry: &Entry, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        if !entry.directory
+            || entry.len == 0
+            || entry.len > 512 * 1024
+            || entry.len % self.geometry.cluster_bytes() != 0
+        {
+            return None;
+        }
+        let chain = self.file_chain(entry.cluster, entry.len, entry.contiguous)?;
+        if chain.iter().any(|id| self.root_chain.contains(id)) {
+            return None;
+        }
+        let mut bytes = alloc::vec![0; entry.len];
+        let size = self.geometry.cluster_bytes();
+        for (&id, data) in chain.iter().zip(bytes.chunks_exact_mut(size)) {
+            if !storage::blocks(self.geometry.lba(id), data, false) {
+                return None;
+            }
+        }
+        let mut outer = core::mem::replace(&mut self.root, bytes);
+        let outer_chain = core::mem::replace(&mut self.root_chain, chain);
+        let previous = self.parent.replace(Parent {
+            chain: outer_chain,
+            offset: entry.offset,
+            contiguous: entry.contiguous,
+        });
+        let result = operation(self);
+        if self.root.len() != entry.len {
+            Self::resize_entry(&mut outer, entry.offset, self.root.len());
+        }
+        self.root = outer;
+        self.root_chain = self.parent.take().unwrap().chain;
+        self.parent = previous;
+        Some(result)
+    }
+
+    fn resize_entry(directory: &mut [u8], offset: usize, len: usize) {
+        let count = usize::from(directory[offset + 1]) + 1;
+        let set = &mut directory[offset..offset + 32 * count];
+        set[33] &= !2;
+        set[40..48].copy_from_slice(&(len as u64).to_le_bytes());
+        set[56..64].copy_from_slice(&(len as u64).to_le_bytes());
+        let check = sum(set, &[2, 3]);
+        set[2..4].copy_from_slice(&check.to_le_bytes());
+    }
+
+    fn in_directory<R>(&mut self, path: &str, operation: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        if path.matches('/').count() >= 8 {
+            return None;
+        }
+        self.walk(path, &mut Some(operation))
+    }
+
+    fn walk<R>(
+        &mut self,
+        path: &str,
+        operation: &mut Option<impl FnOnce(&mut Self) -> R>,
+    ) -> Option<R> {
+        if path.is_empty() {
+            return Some(operation.take()?(self));
+        }
+        let (head, tail) = path.split_once('/').unwrap_or((path, ""));
+        let entry = self
+            .entries()?
+            .into_iter()
+            .find(|entry| entry.directory && entry.name.str().eq_ignore_ascii_case(head))?;
+        self.in_child(&entry, |volume| volume.walk(tail, operation))?
+    }
+
+    pub fn accepts_file(&mut self, path: &str) -> bool {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        if parent.matches('/').count() >= 8 {
             return false;
-        };
-        entries.sort_by_key(|entry| !crate::users::is_database(entry.name.str()));
-        for (file, entry) in files.iter_mut().zip(
-            entries
-                .iter()
-                .filter(|entry| entry.managed && !entry.name.str().eq_ignore_ascii_case(DRAFT)),
-        ) {
-            if entry.len > file.data.bytes.len() || !self.read_entry(entry, &mut file.data.bytes) {
+        }
+        self.in_directory(parent, |volume| {
+            volume.entries().is_some_and(|entries| {
+                !entries
+                    .iter()
+                    .any(|entry| entry.name.str().eq_ignore_ascii_case(name) && !entry.managed)
+            })
+        })
+        .unwrap_or(false)
+    }
+
+    pub fn folder_paths(&self) -> impl Iterator<Item = &str> {
+        self.folders.iter().map(|name| name.str())
+    }
+
+    pub fn mkdir(&mut self, path: &str) -> bool {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        if parent.matches('/').count() >= 8 || !valid_name(name) {
+            return false;
+        }
+        if self.in_directory(parent, |volume| volume.update_entry(name, Some(&[]), true))
+            != Some(true)
+        {
+            return false;
+        }
+        let mut label = crate::text::Text::new();
+        label.set(path);
+        self.folders.push(label);
+        true
+    }
+
+    pub fn rmdir(&mut self, path: &str) -> bool {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let removed = self.in_directory(parent, |volume| {
+            let Some(entry) = volume.entries().and_then(|entries| {
+                entries
+                    .into_iter()
+                    .find(|entry| entry.directory && entry.name.str().eq_ignore_ascii_case(name))
+            }) else {
+                return false;
+            };
+            if volume.in_child(&entry, |child| {
+                child
+                    .root
+                    .chunks_exact(32)
+                    .take_while(|row| row[0] != 0)
+                    .all(|row| row[0] < 128)
+            }) != Some(true)
+            {
                 return false;
             }
-            file.used = true;
-            file.name = entry.name;
-            file.data.len = entry.len;
-            self.tracked.push(entry.name);
+            volume.update_entry(name, None, true)
+        });
+        if removed == Some(true) {
+            self.folders
+                .retain(|folder| !folder.str().eq_ignore_ascii_case(path));
+            true
+        } else {
+            false
         }
-        true
+    }
+
+    pub fn load(&mut self, files: &mut Vec<File>) -> bool {
+        self.load_tree(files, "", 0, &mut 0).is_some()
+    }
+
+    fn load_tree(
+        &mut self,
+        files: &mut Vec<File>,
+        prefix: &str,
+        depth: u8,
+        used: &mut usize,
+    ) -> Option<()> {
+        let mut entries = self.entries()?;
+        entries.sort_by_key(|entry| !crate::users::is_database(entry.name.str()));
+        for entry in &entries {
+            let name = entry.name.str();
+            if prefix.len() + name.len() + 1 > storage::PATH_CAP {
+                continue;
+            }
+            let mut path = crate::text::Text::new();
+            if !prefix.is_empty() {
+                path.append(prefix);
+                path.push(b'/');
+            }
+            path.append(name);
+            if entry.directory && depth < 8 {
+                if self.folders.len() < storage::COUNT {
+                    self.folders.push(path);
+                    let _ = self.in_child(entry, |volume| {
+                        volume.load_tree(files, path.str(), depth + 1, used)
+                    });
+                }
+            } else if entry.managed
+                && !(depth == 0 && name.eq_ignore_ascii_case(DRAFT))
+                && files.len() < storage::COUNT
+                && *used + entry.len <= storage::CACHE_BYTES
+            {
+                let mut bytes = alloc::vec![0; entry.len];
+                if !self.read_entry(entry, &mut bytes) {
+                    return None;
+                }
+                *used += entry.len;
+                self.tracked.push(path);
+                files.push(File {
+                    name: path,
+                    data: storage::Data { bytes },
+                    used: true,
+                    dirty: false,
+                });
+            }
+        }
+        Some(())
     }
 
     pub fn read_draft(&self, data: &mut [u8]) -> bool {
@@ -559,28 +749,101 @@ impl Volume {
 
     fn grow_root(&mut self) -> bool {
         let len = self.geometry.cluster_bytes();
-        if self.root.len() + len > ROOT_LIMIT {
+        let limit = if self.parent.is_some() {
+            512 * 1024
+        } else {
+            ROOT_LIMIT
+        };
+        if self.root.len() + len > limit {
             return false;
         }
         let Some(ids) = self.allocate(1) else {
             return false;
         };
         let id = ids[0];
-        if !storage::blocks(self.geometry.lba(id), &mut alloc::vec![0; len], true)
+        if !self.zero_clusters(&ids)
             || !self.set_allocation(&ids, true)
             || !self.put_fat(id, u32::MAX)
-            || !self.put_fat(*self.root_chain.last().unwrap(), id)
         {
             return false;
         }
+        if self.parent.as_ref().is_some_and(|parent| parent.contiguous)
+            && !self
+                .root_chain
+                .windows(2)
+                .all(|pair| self.put_fat(pair[0], pair[1]))
+        {
+            return false;
+        }
+        if !self.put_fat(*self.root_chain.last().unwrap(), id) {
+            return false;
+        }
+        if let Some(parent) = &self.parent {
+            let sector = self.geometry.sector;
+            let first = parent.offset / sector;
+            let offset = parent.offset % sector;
+            let mut buffer = alloc::vec![0; sector * 2];
+            if !storage::blocks(
+                self.geometry.mapped(&parent.chain, first),
+                &mut buffer[..sector],
+                false,
+            ) {
+                return false;
+            }
+            let count = usize::from(buffer[offset + 1]) + 1;
+            let crosses = offset + count * 32 > sector;
+            if crosses
+                && !storage::blocks(
+                    self.geometry.mapped(&parent.chain, first + 1),
+                    &mut buffer[sector..],
+                    false,
+                )
+            {
+                return false;
+            }
+            Self::resize_entry(&mut buffer, offset, self.root.len() + len);
+            if (crosses
+                && !storage::blocks(
+                    self.geometry.mapped(&parent.chain, first + 1),
+                    &mut buffer[sector..],
+                    true,
+                ))
+                || !storage::blocks(
+                    self.geometry.mapped(&parent.chain, first),
+                    &mut buffer[..sector],
+                    true,
+                )
+            {
+                return false;
+            }
+        } else {
+            self.metadata.push(id);
+            self.metadata.sort_unstable();
+        }
         self.root.resize(self.root.len() + len, 0);
         self.root_chain.push(id);
-        self.metadata.push(id);
-        self.metadata.sort_unstable();
         true
     }
 
-    pub(crate) fn update(&mut self, name: &str, data: Option<&[u8]>) -> bool {
+    pub(crate) fn update(&mut self, path: &str, data: Option<&[u8]>) -> bool {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        if self.in_directory(parent, |volume| volume.update_entry(name, data, false)) != Some(true)
+        {
+            return false;
+        }
+        if !path.eq_ignore_ascii_case(DRAFT) {
+            self.tracked
+                .retain(|entry| !entry.str().eq_ignore_ascii_case(path));
+            if data.is_some() {
+                let mut label = crate::text::Text::new();
+                label.set(path);
+                self.tracked.push(label);
+            }
+        }
+        true
+    }
+
+    fn update_entry(&mut self, name: &str, data: Option<&[u8]>, directory: bool) -> bool {
         if !self.healthy || !valid_name(name) {
             return false;
         }
@@ -590,11 +853,17 @@ impl Volume {
         let old = entries
             .iter()
             .find(|entry| entry.name.str().eq_ignore_ascii_case(name));
-        if old.is_some_and(|entry| !entry.managed) {
+        if old.is_some_and(|entry| {
+            if directory {
+                data.is_some() || !entry.directory
+            } else {
+                !entry.managed
+            }
+        }) {
             return false;
         }
         if let Some((entry, value)) = old.zip(data) {
-            let mut prior = [0; 4096];
+            let mut prior = alloc::vec![0; entry.len];
             if entry.len == value.len()
                 && self.read_entry(entry, &mut prior)
                 && &prior[..entry.len] == value
@@ -606,7 +875,7 @@ impl Volume {
         if data.is_none() && old.is_none() {
             return true;
         }
-        if data.is_some_and(|value| value.len() > 4096) {
+        if data.is_some_and(|value| value.len() > storage::CAP) {
             return false;
         }
         let old_chain = old.map_or_else(
@@ -650,33 +919,61 @@ impl Volume {
         }
         let mut changed_end = target + bytes;
         if let Some(value) = data {
-            let cluster = if value.is_empty() {
-                0
+            let size = if directory {
+                self.geometry.cluster_bytes()
             } else {
-                let Some(chain) =
-                    self.allocate(value.len().div_ceil(self.geometry.cluster_bytes()))
-                else {
+                value.len()
+            };
+            let (cluster, contiguous) = if size == 0 {
+                (0, false)
+            } else {
+                let cluster_bytes = self.geometry.cluster_bytes();
+                let count = size.div_ceil(cluster_bytes);
+                let (chain, contiguous) = if let Some(chain) = self.allocate(count) {
+                    (chain, !directory)
+                } else {
+                    let scattered: Vec<_> = (2..self.geometry.clusters + 2)
+                        .filter(|&id| !self.allocated(id))
+                        .take(count)
+                        .collect();
+                    (scattered, false)
+                };
+                if chain.len() != count {
                     self.healthy = self.dirty(false);
                     return false;
-                };
-                let mut buffer = alloc::vec![0; self.geometry.sector];
-                for (index, chunk) in value.chunks(self.geometry.sector).enumerate() {
-                    buffer.fill(0);
-                    buffer[..chunk.len()].copy_from_slice(chunk);
-                    if !storage::blocks(self.geometry.mapped(&chain, index), &mut buffer, true) {
+                }
+                if !contiguous
+                    && !chain.iter().enumerate().all(|(index, &id)| {
+                        self.put_fat(id, chain.get(index + 1).copied().unwrap_or(u32::MAX))
+                    })
+                {
+                    return false;
+                }
+                if directory && !self.zero_clusters(&chain) {
+                    return false;
+                }
+                let sector = self.geometry.sector;
+                let mut buffer = Vec::new();
+                for (&id, chunk) in chain.iter().zip(value.chunks(cluster_bytes)) {
+                    buffer.clear();
+                    buffer.extend_from_slice(chunk);
+                    buffer.resize(chunk.len().div_ceil(sector) * sector, 0);
+                    if !storage::blocks(self.geometry.lba(id), &mut buffer, true) {
                         return false;
                     }
                 }
                 if !self.set_allocation(&chain, true) {
                     return false;
                 }
-                chain[0]
+                (chain[0], contiguous)
             };
             let set = &mut self.root[target..target + bytes];
             set.fill(0);
             set[0] = 0x85;
             set[1] = count as u8 - 1;
-            set[4] = if name.eq_ignore_ascii_case(DRAFT) {
+            set[4] = if directory {
+                0x10
+            } else if name.eq_ignore_ascii_case(DRAFT) {
                 2
             } else {
                 0x20
@@ -686,14 +983,14 @@ impl Volume {
             }
             set[32..36].copy_from_slice(&[
                 0xc0,
-                if cluster == 0 { 1 } else { 3 },
+                if contiguous { 3 } else { 1 },
                 0,
                 name.len() as u8,
             ]);
             set[36..38].copy_from_slice(&hash(name).to_le_bytes());
-            set[40..48].copy_from_slice(&(value.len() as u64).to_le_bytes());
+            set[40..48].copy_from_slice(&(size as u64).to_le_bytes());
             set[52..56].copy_from_slice(&cluster.to_le_bytes());
-            set[56..64].copy_from_slice(&(value.len() as u64).to_le_bytes());
+            set[56..64].copy_from_slice(&(size as u64).to_le_bytes());
             for (row, part) in set[64..]
                 .chunks_exact_mut(32)
                 .zip(name.as_bytes().chunks(15))
@@ -731,19 +1028,10 @@ impl Volume {
             return false;
         }
         self.healthy = self.dirty(false);
-        if self.healthy && !name.eq_ignore_ascii_case(DRAFT) {
-            self.tracked
-                .retain(|entry| !entry.str().eq_ignore_ascii_case(name));
-            if data.is_some() {
-                let mut entry = crate::text::Text::new();
-                entry.set(name);
-                self.tracked.push(entry);
-            }
-        }
         self.healthy
     }
 
-    pub fn save(&mut self, files: &[File]) -> bool {
+    pub fn save(&mut self, files: &mut [File]) -> bool {
         for old in self.tracked.clone() {
             if !files
                 .iter()
@@ -754,9 +1042,16 @@ impl Volume {
             }
         }
         files
-            .iter()
-            .filter(|file| file.used)
-            .all(|file| self.update(file.name.str(), Some(&file.data.bytes[..file.data.len])))
+            .iter_mut()
+            .filter(|file| file.used && file.dirty)
+            .all(|file| {
+                if self.update(file.name.str(), Some(&file.data.bytes)) {
+                    file.dirty = false;
+                    true
+                } else {
+                    false
+                }
+            })
     }
 
     pub fn save_draft(&mut self, data: &[u8]) -> bool {

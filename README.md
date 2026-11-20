@@ -4,7 +4,7 @@ KreativeOS is an independent x86-64 operating system written from scratch in Rus
 
 ## Download
 
-[Download the compiled KreativeOS boot bundle](dist/KreativeOS-x86_64.zip?raw=true). It includes the boot disk, blank data disk, EFI binary, checksums, serial log and captured desktop. Extract the bundle into `build/` to use `scripts/run.sh`.
+[Current builds are available on GitHub Actions](https://github.com/Bobdahacker-official/KreativeOS/actions/workflows/build.yml). Open the latest successful `main` build and download its `KreativeOS-x86_64` artifact. It includes the boot disk, data disk, EFI binary, and checksums.
 
 ![KreativeOS desktop](docs/desktop.png)
 
@@ -105,7 +105,7 @@ The gallery reads up to 36 imported images from packs totaling 6 MiB. Each image
 
 ## Files and packages
 
-New volumes use exFAT 1.00. KreativeOS mounts one valid data volume, looking for USB first, then NVMe, AHCI SATA, and IDE. Ordinary exFAT volumes mount read-only until you confirm writes in first-boot setup or sign in to an existing account on that volume. Previously prepared `KOSDAT` data volumes remain writable by default. KreativeOS manages up to 24 root files, with ASCII names up to 32 bytes and up to 2 KiB per file. Existing KFS images remain available through `KREATIVE_DATA_IMAGE`.
+New volumes use exFAT 1.00. KreativeOS mounts one valid data volume, looking for USB first, then NVMe, AHCI SATA, and IDE. Ordinary exFAT volumes mount read-only until you confirm writes in first-boot setup or sign in to an existing account on that volume. Previously prepared `KOSDAT` data volumes remain writable by default. Files and Notes support nested folders and files up to 1 MiB. The guest caches up to 1,024 files within a 12 MiB cache budget. Existing KFS images remain available through `KREATIVE_DATA_IMAGE` with their original limits.
 
 ### SSDs, HDDs and data migration
 
@@ -115,7 +115,7 @@ Use `KreativeOS-exfat.img` as a dedicated virtual data disk. The combined USB im
 python scripts/exfat_image.py build/data-gpt-4kn.img --partition gpt --sector-size 4096
 ```
 
-Attach a 4Kn image to a virtual disk configured with 4,096-byte logical sectors. Use the portable exFAT path for file exchange. The guest currently manages small root files and uses host tools for directory trees, large files and dirty-volume recovery.
+Attach a 4Kn image to a virtual disk configured with 4,096-byte logical sectors. Use `mkdir Projects` and `mkdir Projects/Notes` to create folders, then open them in Files or use `edit Projects/Notes/report.txt` in Terminal. Use host tools to recover a dirty volume.
 
 To copy legacy files and accounts to a new SATA image while keeping the original image:
 
@@ -145,7 +145,7 @@ The included `Guide.kapp` is installed as `Guide.app`. Its KAPP1 header contains
 
 ## Develop on the host
 
-Put UTF-8 `.txt`, `.html` and `.ksh` files or binary `.kr3` programs in a directory and point `KREATIVE_DEV_DIR` at it before building. The builder embeds them in the boot image. Each file can hold up to 2 KiB, and names can contain up to 32 printable ASCII characters. Inside the guest, open Terminal and run:
+Put UTF-8 `.txt`, `.html` and `.ksh` files or binary `.kr3` programs in a directory and point `KREATIVE_DEV_DIR` at it before building. The builder embeds up to 1 MiB of staged data in the boot image. Names can contain up to 32 printable ASCII characters. Inside the guest, open Terminal and run:
 
 ```text
 dev list
@@ -165,7 +165,7 @@ browse file:Demo.html
 
 New passwords use PBKDF2-HMAC-SHA-256 with 600,000 iterations and a fresh 128-bit hardware-generated salt. Existing local account files remain readable.
 
-Both account types open the desktop. Standard accounts have separate file and application settings, and Terminal runs their own KR3 executables. Administration, system networking changes and restart require the administrator. The KR3 runner maps executable code and a writable, non-executable stack into CPU ring 3. An invalid memory access or a CPU exception stops the program. The local APIC timer limits each run to roughly 250 ms.
+Both account types open the desktop. Standard accounts have separate file and application settings, and Terminal runs their own KR3 executables. Administration, system networking changes and restart require the administrator. `exec NAME.kr3` queues a process, `ps` lists the session's processes, and `kill PID` terminates one. The single-core scheduler saves and restores CPU state on each APIC time slice and services desktop input between slices. Each process has its own address space, up to 64 KiB of executable code, a 16 KiB guarded stack, and up to 512 KiB of demand-allocated heap.
 
 On exFAT, each standard account gets the full 32-character local filename allowance. The storage prefix is separate from that limit. When a file is replaced or removed, the exFAT driver clears the retired data clusters before making them available for reuse.
 
@@ -177,6 +177,6 @@ Build the example with NASM:
 nasm -f bin examples/user/hello.asm -o alice.hello.kr3
 ```
 
-KR3 version 1 takes a flat x86-64 binary with the four-byte header `4b 52 33 01`. Execution starts at the first byte after the header, mapped at `0x400000000000`. Use RIP-relative addressing. The writable stack is one 4 KiB page, with an unmapped gap below it. The `int 0x80` ABI uses EAX for the call number. Call 0 exits with EBX as the status. Call 1 writes up to 512 bytes from RBX with length in RSI, returning the byte count in RAX. RCX, RDX, R8–R11 and volatile SSE registers may change across a system call.
+KR3 version 1 takes a flat x86-64 binary with the four-byte header `4b 52 33 01`. Execution starts at the first byte after the header, mapped at `0x400000000000`. Use RIP-relative addressing. The `int 0x80` ABI uses EAX for the call number. Call 0 exits with EBX as the status. Call 1 writes up to 512 bytes from RBX with length in RSI, returning the byte count in RAX. Call 2 grows the private heap to the requested size in RBX and returns its base in RAX. A negative result indicates an error.
 
 See [architecture](docs/architecture.md), [UI references](docs/design.md) and [verification](docs/verification.md).

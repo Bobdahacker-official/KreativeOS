@@ -53,7 +53,7 @@ impl Profile {
 
     fn saved() -> Option<Self> {
         let file = storage::find(PROFILE)?;
-        Self::read(unsafe { storage::FILES[file].data }.str())
+        Self::read(unsafe { storage::FILES[file].data.clone() }.str())
     }
 }
 

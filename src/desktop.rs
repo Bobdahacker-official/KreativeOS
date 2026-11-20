@@ -191,8 +191,14 @@ struct Tab {
 }
 enum SearchTarget {
     App(usize),
-    File(Text<{ storage::DISK_NAME_CAP }>),
+    File(Text<{ storage::PATH_CAP }>),
     Web(alloc::boxed::Box<Text<384>>),
+}
+enum FileChoice {
+    Parent,
+    Folder(alloc::boxed::Box<Text<{ storage::PATH_CAP }>>),
+    Image(usize),
+    Document(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -300,18 +306,19 @@ struct Desktop {
     magnifier: bool,
     workspace: usize,
     window_workspace: [usize; APP_COUNT],
-    clipboard: alloc::vec::Vec<Text<2048>>,
+    clipboard: alloc::vec::Vec<storage::Data>,
     mx: i32,
     my: i32,
     buttons: u8,
     drag: Option<(usize, i32, i32)>,
     accent: u32,
-    note: Text<2048>,
-    filename: Text<{ storage::DISK_NAME_CAP }>,
+    note: storage::Data,
+    filename: Text<{ storage::PATH_CAP }>,
     draft_at: Option<u64>,
     file_search: Text<48>,
     file_cursor: usize,
     file_images: bool,
+    file_folder: Text<{ storage::PATH_CAP }>,
     file_preview: Option<(usize, crate::pictures::Picture)>,
     terminal: Text<4096>,
     command: Text<128>,
@@ -365,6 +372,7 @@ struct Desktop {
     images: Catalog,
     organizer: crate::organizer::Organizer,
     users: crate::users::Session,
+    scheduler: crate::ring3::Scheduler,
     hardware_center: crate::hardware_center::Center,
 }
 impl Desktop {
@@ -372,7 +380,7 @@ impl Desktop {
     fn new(w: usize, h: usize, users: crate::users::Session) -> Self {
         let mut appearance = (0, 0, false, 0);
         if let Some(index) = storage::find("Appearance.cfg") {
-            let data = unsafe { storage::FILES[index].data };
+            let data = unsafe { storage::FILES[index].data.clone() };
             let mut fields = data
                 .str()
                 .split_ascii_whitespace()
@@ -406,12 +414,13 @@ impl Desktop {
             buttons: 0,
             drag: None,
             accent: PRESETS[appearance.3 as usize].2,
-            note: Text::new(),
+            note: storage::Data::default(),
             filename: Text::new(),
             draft_at: None,
             file_search: Text::new(),
             file_cursor: 0,
             file_images: false,
+            file_folder: Text::new(),
             file_preview: None,
             terminal: Text::new(),
             command: Text::new(),
@@ -463,6 +472,7 @@ impl Desktop {
             images: Catalog::new(),
             organizer: crate::organizer::Organizer::new(),
             users,
+            scheduler: crate::ring3::Scheduler::new(),
             hardware_center: crate::hardware_center::Center::new(),
             ethernet: crate::ethernet::Editor::new(),
             ethernet_tab: true,
@@ -479,7 +489,7 @@ impl Desktop {
             "Untitled.txt"
         });
         if let Some(i) = storage::find("Welcome.txt") {
-            unsafe { d.note = storage::FILES[i].data }
+            unsafe { d.note = storage::FILES[i].data.clone() }
         }
         d.terminal
             .set("KreativeOS shell\nType help to see commands.\n");
@@ -512,7 +522,7 @@ impl Desktop {
         if let Some((name, note)) = storage::load_draft() {
             let already_saved = storage::find(name.str()).is_some_and(|index| {
                 let saved = unsafe { &storage::FILES[index].data };
-                saved.bytes[..saved.len] == note.bytes[..note.len]
+                saved.bytes[..saved.len()] == note.bytes[..note.len()]
             });
             if !already_saved {
                 d.filename.set(name.str());
@@ -640,12 +650,12 @@ impl Desktop {
             }
         }
     }
-    fn open_file(&mut self, name: Text<{ storage::DISK_NAME_CAP }>) {
+    fn open_file(&mut self, name: Text<{ storage::PATH_CAP }>) {
         let Some(index) = storage::find(name.str()) else {
             return;
         };
-        let file = unsafe { storage::FILES[index].data };
-        if file.bytes[..file.len].starts_with(b"PK\x03\x04") || name.str().ends_with(".zip") {
+        let file = unsafe { storage::FILES[index].data.clone() };
+        if file.bytes[..file.len()].starts_with(b"PK\x03\x04") || name.str().ends_with(".zip") {
             self.archive(name.str(), false);
             self.open(2);
         } else if name.str().ends_with(".html") {
@@ -666,66 +676,96 @@ impl Desktop {
                 part.eq_ignore_ascii_case(&self.file_search.bytes[..self.file_search.len])
             })
     }
-    fn file_items(&self) -> alloc::vec::Vec<usize> {
+    fn file_items(&self) -> alloc::vec::Vec<FileChoice> {
         if self.file_images {
-            self.images
+            return self
+                .images
                 .files
                 .iter()
                 .enumerate()
-                .filter_map(|(i, (name, _))| self.file_matches(name).then_some(i))
-                .collect()
-        } else {
-            unsafe {
-                storage::FILES
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, file)| {
-                        (file.used
-                            && storage::visible_name(file.name.str())
-                                .is_some_and(|name| self.file_matches(name)))
-                        .then_some(i)
-                    })
-                    .collect()
+                .filter_map(|(i, (name, _))| {
+                    self.file_matches(name).then_some(FileChoice::Image(i))
+                })
+                .collect();
+        }
+        let mut items = alloc::vec::Vec::new();
+        if self.file_folder.len != 0 {
+            items.push(FileChoice::Parent);
+        }
+        for folder in storage::folders() {
+            let (parent, label) = folder.str().rsplit_once('/').unwrap_or(("", folder.str()));
+            if parent.eq_ignore_ascii_case(self.file_folder.str()) && self.file_matches(label) {
+                items.push(FileChoice::Folder(alloc::boxed::Box::new(folder)));
             }
         }
+        for (index, file) in unsafe { &storage::FILES }.iter().enumerate() {
+            let Some(path) = storage::visible_name(file.name.str()).filter(|_| file.used) else {
+                continue;
+            };
+            let (parent, label) = path.rsplit_once('/').unwrap_or(("", path));
+            if parent.eq_ignore_ascii_case(self.file_folder.str()) && self.file_matches(label) {
+                items.push(FileChoice::Document(index));
+            }
+        }
+        items
     }
+
     fn file_viewport(&self) -> (usize, usize) {
         let rows = ((self.windows[0].h - 135) / 36).max(1) as usize;
         (self.file_cursor.saturating_sub(rows - 1), rows)
     }
+
     fn file_select(&mut self, row: usize) {
-        let Some(index) = self.file_items().get(row).copied() else {
-            return;
-        };
+        let items = self.file_items();
+        let Some(item) = items.get(row) else { return };
         self.file_cursor = row;
-        self.file_preview = if self.file_images {
-            crate::pictures::decode(self.images.files[index].1).map(|image| (index, image))
-        } else {
-            None
+        self.file_preview = match item {
+            FileChoice::Image(index) => {
+                crate::pictures::decode(self.images.files[*index].1).map(|image| (*index, image))
+            }
+            _ => None,
         };
     }
+
     fn file_open_selected(&mut self) {
-        let Some(index) = self.file_items().get(self.file_cursor).copied() else {
+        let items = self.file_items();
+        let Some(item) = items.get(self.file_cursor) else {
             return;
         };
-        if self.file_images {
-            self.images.select(index);
-            self.open(IMAGES);
-        } else {
-            if let Some(name) = storage::visible_name(unsafe { storage::FILES[index].name.str() }) {
-                let mut local_name = Text::new();
-                local_name.set(name);
-                self.open_file(local_name);
+        match item {
+            FileChoice::Parent => {
+                self.file_folder.len = self.file_folder.str().rfind('/').unwrap_or(0);
+                self.file_cursor = 0;
+                self.file_search.clear();
+            }
+            FileChoice::Folder(folder) => {
+                self.file_folder = **folder;
+                self.file_cursor = 0;
+                self.file_search.clear();
+            }
+            FileChoice::Image(index) => {
+                self.images.select(*index);
+                self.open(IMAGES);
+            }
+            FileChoice::Document(index) => {
+                if let Some(path) =
+                    storage::visible_name(unsafe { storage::FILES[*index].name.str() })
+                {
+                    let mut name = Text::new();
+                    name.set(path);
+                    self.open_file(name);
+                }
             }
         }
     }
+
     fn archive(&mut self, name: &str, extract: bool) {
         let Some(index) = storage::find(name) else {
             self.terminal.append("Archive not found");
             return;
         };
-        let data = unsafe { storage::FILES[index].data };
-        let Some(entries) = crate::archive::read(&data.bytes[..data.len]) else {
+        let data = unsafe { storage::FILES[index].data.clone() };
+        let Some(entries) = crate::archive::read(&data.bytes[..data.len()]) else {
             self.terminal
                 .append("Unsupported ZIP layout, file size or checksum");
             return;
@@ -1031,7 +1071,7 @@ impl Desktop {
         self.scroll = 0
     }
     fn save(&mut self) {
-        match storage::put(self.filename.str(), &self.note.bytes[..self.note.len]) {
+        match storage::put(self.filename.str(), &self.note.bytes[..self.note.len()]) {
             Ok(()) if storage::sync() => {
                 if self.draft_at.take().is_some() {
                     storage::store_draft(self.filename.str(), &self.note);
@@ -1206,9 +1246,9 @@ impl Desktop {
                 _ => {}
             },
             1 => match key {
-                0xa7 if self.note.len > 0 => {
+                0xa7 if self.note.len() > 0 => {
                     self.clipboard.retain(|text| text.str() != self.note.str());
-                    self.clipboard.insert(0, self.note);
+                    self.clipboard.insert(0, self.note.clone());
                     self.clipboard.truncate(8);
                     self.notice
                         .set("Copied document. Ctrl+V pastes, Ctrl+Shift+V cycles history.");
@@ -1218,7 +1258,7 @@ impl Desktop {
                         self.clipboard.rotate_left(1);
                     }
                     if let Some(text) = self.clipboard.first() {
-                        if self.note.len + text.len <= self.note.bytes.len() {
+                        if self.note.len() + text.len() <= storage::CAP {
                             self.note.append(text.str());
                             self.draft_at = Some(hardware::millis() + 750);
                             self.notice.set("Pasted from clipboard");
@@ -1228,13 +1268,13 @@ impl Desktop {
                     }
                 }
                 8 | b'\n' | 32..=126 => {
-                    let size = self.note.len;
+                    let size = self.note.len();
                     if key == 8 {
                         self.note.pop();
                     } else {
                         self.note.push(key);
                     }
-                    if size != self.note.len {
+                    if size != self.note.len() {
                         self.draft_at = Some(hardware::millis() + 750);
                     }
                 }
@@ -1723,15 +1763,32 @@ impl Desktop {
         }
         match verb{
  "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nziplist NAME | unzip NAME | run NAME\ndev list | dev import | exec NAME.kr3\naccounts | lock | sdk | install NAME.kapp | snapshot | reboot\n"),
- "ls"=>unsafe{for f in &storage::FILES{if let Some(name)=storage::visible_name(f.name.str()).filter(|_| f.used){let _=writeln!(self.terminal,"{name}  {} bytes",f.data.len);}}},
+ "ls"=>unsafe{for f in &storage::FILES{if let Some(name)=storage::visible_name(f.name.str()).filter(|_| f.used){let _=writeln!(self.terminal,"{name}  {} bytes",f.data.len());}}},
+ "lsdir" => {
+    for folder in storage::folders() { let _ = writeln!(self.terminal, "{}/", folder.str()); }
+ },
+ "mkdir" => {
+    self.terminal.append(match storage::mkdir(arg) { Ok(()) => "Folder created", Err(error) => error });
+ },
+ "rmdir" => {
+    self.terminal.append(match storage::rmdir(arg) { Ok(()) => "Folder removed", Err(error) => error });
+ },
+ "cp" => {
+    if let Some((source, destination)) = arg.split_once(' ') {
+        if let Some(index) = storage::find(source) {
+            let bytes = unsafe { storage::FILES[index].data.bytes.clone() };
+            self.terminal.append(if storage::store_file(destination.trim(), &bytes) { "File copied" } else { "Could not save the copy" });
+        } else { self.terminal.append("Source file not found"); }
+    } else { self.terminal.append("Use cp SOURCE DESTINATION"); }
+ },
  "cat"=>{if let Some(i)=storage::find(arg){unsafe{self.terminal.append(storage::FILES[i].data.str())}}else{self.terminal.append("File not found")}},
  "touch"=>{match storage::put(arg,b""){Ok(())=>{self.terminal.append(if storage::sync(){"Created on disk"}else{"Created in memory"})},Err(e)=>self.terminal.append(e)}},
  "rm"=>{if storage::remove(arg){self.terminal.append(if storage::sync(){"Removed from disk"}else{"Removed from memory"})}else{self.terminal.append("File not found")}},
- "edit"=>{if arg.is_empty() || arg.len() > if self.users.administrator() { storage::DISK_NAME_CAP } else { storage::LOCAL_NAME_CAP } || !arg.is_ascii() || arg.contains(['/', '\\']) {
+ "edit"=>{if arg.is_empty() || arg.len() > storage::PATH_CAP || !arg.is_ascii() || arg.contains('\\') {
    self.terminal.append("Enter a valid file name");
  } else {
    self.checkpoint_draft(true);
-   self.filename.set(arg);self.note.clear();if let Some(i)=storage::find(arg){unsafe{self.note=storage::FILES[i].data}}self.open(1)
+   self.filename.set(arg);self.note.clear();if let Some(i)=storage::find(arg){unsafe{self.note=storage::FILES[i].data.clone()}}self.open(1)
  }},
  "save"=>{self.save();self.terminal.append(self.notice.str())},"clear"=>self.terminal.clear(),
  "open"=>{if let Some(i)=NAMES.iter().position(|s|s.eq_ignore_ascii_case(arg)){self.open(i)}else{self.terminal.append("Unknown app")}},
@@ -1764,19 +1821,26 @@ impl Desktop {
  },
  "exec" if allow_script => {
      if let Some(index) = storage::find(arg) {
-         let binary = unsafe { storage::FILES[index].data };
-         if let Err(error) = crate::ring3::run(&binary.bytes[..binary.len], &mut self.terminal) {
-             self.terminal.append(error);
+         let binary = unsafe { &storage::FILES[index].data };
+         match self.scheduler.spawn(arg, &binary.bytes[..binary.len()]) {
+             Ok(pid) => { let _ = writeln!(self.terminal, "Started process {pid}"); }
+             Err(error) => self.terminal.append(error),
          }
      } else {
          self.terminal.append("User executable was not found");
      }
  },
+ "ps" => self.scheduler.list(&mut self.terminal),
+ "kill" if allow_script => {
+     self.terminal.append(if arg.parse().ok().is_some_and(|pid| self.scheduler.kill(pid)) {
+         "Process terminated"
+     } else { "Process not found" });
+ },
  "ziplist"=>self.archive(arg, false),
  "unzip"=>self.archive(arg, true),
  "run" if allow_script => {
    if let Some(index) = storage::find(arg) {
-       let script = unsafe { storage::FILES[index].data };
+       let script = unsafe { storage::FILES[index].data.clone() };
        let commands = script.str().lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#'));
        for command in commands.take(32) { self.execute_line(command, n, false); }
    } else { self.terminal.append("Script was not found"); }
@@ -2077,6 +2141,7 @@ impl Desktop {
             0 => {
                 if x < 142 && (89..159).contains(&y) {
                     self.file_images = y >= 124;
+                    self.file_folder.clear();
                     self.file_cursor = 0;
                     self.file_preview = None;
                     self.file_select(0);
@@ -2686,23 +2751,23 @@ impl Desktop {
                 if items.is_empty() {
                     s.text(x + 174, y + 134, "No matching files", MUTED, 1);
                 }
-                for (row, &index) in items.iter().enumerate().skip(first).take(count) {
+                for (row, item) in items.iter().enumerate().skip(first).take(count) {
                     let yy = y + 126 + (row - first) as i32 * 36;
-                    let name = if self.file_images {
-                        self.images.files[index].0
-                    } else {
-                        storage::visible_name(unsafe { storage::FILES[index].name.str() })
-                            .unwrap_or("")
+                    let (path, icon) = match item {
+                        FileChoice::Parent => ("Up one folder", 0),
+                        FileChoice::Folder(path) => (path.str(), 0),
+                        FileChoice::Image(index) => (self.images.files[*index].0, IMAGES),
+                        FileChoice::Document(index) => (
+                            storage::visible_name(unsafe { storage::FILES[*index].name.str() })
+                                .unwrap_or(""),
+                            1,
+                        ),
                     };
+                    let name = path.rsplit('/').next().unwrap_or(path);
                     if row == self.file_cursor {
                         s.rounded(x + 165, yy + 2, list_width - 4, 30, 5, SELECTED, 255);
                     }
-                    s.symbol(
-                        x + 171,
-                        yy + 7,
-                        if self.file_images { IMAGES } else { 1 },
-                        self.accent,
-                    );
+                    s.symbol(x + 171, yy + 7, icon, self.accent);
                     s.text(
                         x + 198,
                         yy + 7,
@@ -2712,12 +2777,12 @@ impl Desktop {
                     );
                 }
                 if split {
-                    if let Some(&index) = items.get(self.file_cursor) {
-                        if self.file_images {
+                    match items.get(self.file_cursor) {
+                        Some(FileChoice::Image(index)) => {
                             if let Some((_, image)) = self
                                 .file_preview
                                 .as_ref()
-                                .filter(|(selected, _)| *selected == index)
+                                .filter(|(selected, _)| selected == index)
                             {
                                 s.image(
                                     x + 339,
@@ -2728,9 +2793,10 @@ impl Desktop {
                                     false,
                                 );
                             }
-                        } else {
-                            let data = unsafe { &storage::FILES[index].data };
-                            let preview = if data.len == 0 {
+                        }
+                        Some(FileChoice::Document(index)) => {
+                            let data = unsafe { &storage::FILES[*index].data };
+                            let preview = if data.len() == 0 {
                                 "Empty file"
                             } else if data.str().is_empty() {
                                 "Binary file"
@@ -2741,6 +2807,7 @@ impl Desktop {
                             s.rect(x + 342, y + 153, w - 359, 1, DIVIDER);
                             s.wrapped_small(x + 342, y + 162, w - 359, h - 179, preview, MUTED);
                         }
+                        _ => {}
                     }
                 }
                 let mut count = Text::<32>::new();
@@ -3298,7 +3365,7 @@ fn read_urls(name: &str) -> alloc::vec::Vec<Text<384>> {
     let Some(index) = storage::find(name) else {
         return alloc::vec::Vec::new();
     };
-    let data = unsafe { storage::FILES[index].data };
+    let data = unsafe { storage::FILES[index].data.clone() };
     data.str()
         .lines()
         .take(24)
@@ -3316,11 +3383,12 @@ fn save_urls(name: &str, urls: &mut alloc::vec::Vec<Text<384>>) {
     while urls.iter().map(|url| url.len + 1).sum::<usize>() > storage::CAP {
         urls.pop();
     }
-    let mut data = Text::<{ storage::CAP }>::new();
+    let mut data = storage::Data::default();
     for url in urls {
-        let _ = writeln!(data, "{}", url.str());
+        data.append(url.str());
+        data.push(b'\n');
     }
-    if storage::put(name, &data.bytes[..data.len]).is_ok() {
+    if storage::put(name, &data.bytes[..data.len()]).is_ok() {
         storage::sync();
     }
 }
@@ -3426,6 +3494,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
                 }
                 if (desktop.users.current(), desktop.users.system()) != previous_account {
                     crate::audio::stop();
+                    desktop.scheduler.clear();
                     network.clear_browser_session();
                     if desktop.users.current().is_some() {
                         storage::set_standard_account(desktop.users.standard_name());
@@ -3450,6 +3519,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
         }
         desktop.checkpoint_draft(false);
         crate::system1::tick(hardware::millis());
+        dirty |= desktop.scheduler.step(&mut desktop.terminal);
         network.poll();
         if network.tls_pending {
             desktop.draw(&mut s, &network);

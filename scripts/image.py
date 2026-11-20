@@ -98,22 +98,25 @@ if source_dir:
                     if p.is_file() and p.suffix in {'.txt', '.html', '.ksh', '.kr3'})
     if not 1 <= len(inputs) <= 24:
         raise ValueError('A developer pack requires 1 to 24 .txt, .html, .ksh or .kr3 files')
-    developer = bytearray(b'KDP1')
+    developer = bytearray(b'KDP2')
     for path in inputs:
         name = path.name.encode('ascii')
         if not 1 <= len(name) <= 32 or any(c < 32 or c > 126 or c == 92 for c in name):
             raise ValueError(f'{path.name}: expected a printable ASCII name of up to 32 bytes')
+        limit = 65540 if path.suffix == '.kr3' else 1024 * 1024
         with path.open('rb') as file:
-            data = file.read(2049)
-        if len(data) > 2048:
-            raise ValueError(f'{path.name}: exceeds the KFS file limit of 2048 bytes')
+            data = file.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError(f'{path.name}: exceeds the {limit}-byte developer file limit')
         if path.suffix == '.kr3':
             if not data.startswith(b'KR3\x01') or len(data) <= 4:
                 raise ValueError(f'{path.name}: expected a KR3 version 1 executable')
         else:
             data.decode('utf-8')
-        developer.extend(struct.pack('<BH', len(name), len(data)))
+        developer.extend(struct.pack('<BI', len(name), len(data)))
         developer.extend(name + data)
+        if len(developer) > 1024 * 1024:
+            raise ValueError('The developer pack exceeds 1 MiB')
     developer_cluster = allocate(developer)
     slot = next(pos for pos in range(root_pos + 32, root_pos + 128, 32) if not image[pos])
     image[slot:slot+32] = entry('DEVELOP KDP', 32, developer_cluster, len(developer))

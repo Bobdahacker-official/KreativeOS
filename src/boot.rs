@@ -392,7 +392,7 @@ unsafe fn load_pictures(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut 
                     && end == 0
                     && extra == 0
                     && (4..=buffer.len()).contains(&len)
-                    && &buffer[..4] == b"KDP1"
+                    && matches!(&buffer[..4], b"KDP1" | b"KDP2")
                 {
                     crate::developer::STAGED = len;
                 }

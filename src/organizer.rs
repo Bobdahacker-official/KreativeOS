@@ -71,7 +71,7 @@ impl Organizer {
     fn records(&self) -> Vec<String> {
         storage::find(self.name())
             .map(|index| {
-                let data = unsafe { storage::FILES[index].data };
+                let data = unsafe { storage::FILES[index].data.clone() };
                 data.str().lines().map(String::from).collect()
             })
             .unwrap_or_default()

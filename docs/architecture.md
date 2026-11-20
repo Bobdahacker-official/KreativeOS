@@ -1,18 +1,18 @@
 # Architecture
 
-`efi_main` is a PE32+ UEFI entry point. The loader locates GOP, selects 1024x768 when supported, allocates a composition buffer and low-memory DMA pages, captures the firmware memory map and exits boot services. Firmware code is never called afterward.
+`efi_main` is a PE32+ UEFI entry point. The loader locates GOP, prefers 1280×720, allocates a composition buffer and low-memory DMA pages, captures the firmware memory map and exits boot services. Firmware code is never called afterward.
 
 The kernel masks legacy PIC interrupts and runs a polling loop. PIT channel 2 calibrates TSC timing. Input reads the i8042 controller with mouse packet synchronization and keyboard scan-set-1 translation. Graphics compose into a RAM buffer then copy to GOP memory with RGB/BGR conversion. The RTC supplies taskbar time.
 
 RTL8139 discovery uses PCI configuration mechanism 1. Receive and transmit DMA use a reserved allocation below 4 GiB. Frames pass through length, destination and checksum checks before reaching the single HTTP client. DHCP tracks discovery, renewal, rebinding and expiration independently of browser requests. ARP caches validated next-hop replies for up to 60 seconds. The DNS resolver checks the server endpoint, transaction ID and echoed question, then follows bounded CNAME chains. Ethernet hardware, transport state and browser text are separated into driver and application state.
 
-New data volumes use exFAT over USB bulk-only transport, NVMe, AHCI or ATA PIO. The filesystem writes ordinary root files, checks directory entry sets, and guards metadata changes with the volume dirty flag and transport flushes. The block layer grants writes only inside the validated data partition. Explicit legacy KFS images still use two alternating checksummed snapshots.
+New data volumes use exFAT over USB bulk-only transport, NVMe, AHCI or ATA PIO. The filesystem follows directory and file cluster chains, grows directories, and guards metadata changes with the volume dirty flag and transport flushes. The block layer grants writes only inside the validated data partition. Explicit legacy KFS images still use two alternating checksummed snapshots.
 
-Applications share one cooperative kernel event loop. Window order is independent of stable taskbar slots. Package installation creates persistent document applications. The developer pack stages host files during UEFI boot and imports them into the data volume on explicit request. Imported terminal scripts use the same interpreter and privileges as the interactive terminal.
+Built-in desktop applications share the kernel event loop. Window order is independent of stable taskbar slots. Package installation creates persistent document applications. The developer pack stages host files during UEFI boot and imports them into the data volume on explicit request. Terminal scripts use the interactive interpreter with restrictions on interactive-only commands.
 
-`ring3.rs` creates a page table root for each run. Existing kernel mappings have their user bit cleared at the top level. A separate branch maps user code read-only and executable and maps the stack read/write with NX. A TSS points interrupts at a kernel stack. The interrupt ABI offers output from validated user ranges and process exit. An APIC deadline and CPU exception gates return control to the calling desktop or user console. Programs run one at a time and have no filesystem or device system calls.
+`ring3.rs` owns one page-table root and CPU context per scheduled process. Each APIC slice saves process registers, the interrupt frame and x87/SSE state before returning to the event loop. A ready process returns to the end of the queue, and the next slice can resume it. User mappings contain read-only executable code, a guarded writable stack, and demand-allocated non-executable heap pages. The interrupt ABI supports output from validated user ranges, heap growth and process exit. The scheduler currently runs on one core.
 
-`users.rs` persists salted PBKDF2-SHA256 password records on the data volume. The boot sign-in screen routes the administrator to the desktop and standard users to a command console. The console exposes only executables assigned to that username. The data volume is managed by the administrator.
+`users.rs` persists salted PBKDF2-SHA256 password records on the data volume. Both account types open the desktop. Standard sessions use a private file namespace. An administrator can explicitly open the `system1` maintenance desktop.
 
 Source map:
 
@@ -22,7 +22,8 @@ Source map:
 | `hardware.rs` | Port I/O, PCI, PS/2, serial, timer, RTC |
 | `graphics.rs` | Pixel composition, glyphs, lines, text |
 | `storage.rs` | Data disk selection, bounded block access and legacy KFS |
-| `exfat.rs` | exFAT validation, allocation and persistent root files |
+| `exfat.rs` | exFAT validation, allocation, files and directories |
+| `ring3.rs` | User address spaces, system calls and preemptive scheduling |
 | `usb.rs` | xHCI, USB HID boot input and bulk-only mass storage |
 | `net.rs` | RTL8139, ARP, DNS, TCP, HTTP and HTML text |
 | `desktop.rs` | Window manager, apps, package installation |

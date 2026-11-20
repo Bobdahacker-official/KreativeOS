@@ -56,17 +56,18 @@ impl Package {
         Some(body)
     }
     pub fn open(&self) -> Option<Text<2048>> {
-        let file = unsafe { storage::FILES[storage::find(self.installed)?].data };
-        let body = self.verified(&file.bytes[..file.len])?;
+        let file = unsafe { storage::FILES[storage::find(self.installed)?].data.clone() };
+        let body = self.verified(&file.bytes[..file.len()])?;
         let mut document = Text::new();
         document.set(body);
         Some(document)
     }
     pub fn install(&self) -> Result<bool, &'static str> {
-        let local = storage::find(self.source).map(|index| unsafe { storage::FILES[index].data });
+        let local =
+            storage::find(self.source).map(|index| unsafe { storage::FILES[index].data.clone() });
         let bytes = local
             .as_ref()
-            .map_or(self.bytes, |data| &data.bytes[..data.len]);
+            .map_or(self.bytes, |data| &data.bytes[..data.len()]);
         self.verified(bytes)
             .ok_or("Package signature or manifest rejected")?;
         storage::put(self.installed, bytes)?;

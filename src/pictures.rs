@@ -83,15 +83,22 @@ pub fn decode(data: &[u8]) -> Option<Picture> {
         .set_max_width(4096)
         .set_max_height(4096);
     let (width, height, color, bytes) = if data.starts_with(b"\x89PNG\r\n\x1a\n") {
-        let options = options.png_set_strip_to_8bit(true);
-        let mut png = zune_png::PngDecoder::new_with_options(ZCursor::new(data), options);
-        png.decode_headers().ok()?;
-        let (w, h) = png.dimensions()?;
+        if data.get(12..16)? != b"IHDR" {
+            return None;
+        }
+        let w = u32::from_be_bytes(data.get(16..20)?.try_into().ok()?) as usize;
+        let h = u32::from_be_bytes(data.get(20..24)?.try_into().ok()?) as usize;
         if !fits(w, h) {
             return None;
         }
-        let bytes = png.decode_raw().ok()?;
-        (w, h, png.colorspace()?, bytes)
+        let png = nopng::decode_image(data).ok()?;
+        if png.width.get() as usize != w || png.height.get() as usize != h {
+            return None;
+        }
+        let bytes =
+            nopng::reformat_pixels(&png.pixel_format, &png.pixels, &nopng::PixelFormat::Rgba8)
+                .ok()?;
+        (w, h, ColorSpace::RGBA, bytes)
     } else if data.starts_with(&[0xff, 0xd8]) {
         let options = options.jpeg_set_out_colorspace(ColorSpace::RGB);
         let mut jpg = zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(data), options);

@@ -3,21 +3,40 @@ use crate::storage;
 use alloc::vec::Vec;
 use core::{fmt::Write, str};
 
-const LIMIT: usize = 4 + storage::COUNT * (3 + 32 + storage::CAP);
+const LIMIT: usize = 1024 * 1024;
 pub static mut PACK: [u8; LIMIT] = [0; LIMIT];
 pub static mut STAGED: usize = 0;
 
 fn entries() -> Result<Vec<(&'static str, &'static [u8])>, &'static str> {
     let data = unsafe { &PACK[..STAGED] };
-    let mut rest = data
-        .strip_prefix(b"KDP1")
-        .ok_or("No developer pack staged")?;
+    let (mut rest, wide) = if let Some(rest) = data.strip_prefix(b"KDP2") {
+        (rest, true)
+    } else {
+        (
+            data.strip_prefix(b"KDP1")
+                .ok_or("No developer pack staged")?,
+            false,
+        )
+    };
     let mut files = Vec::new();
     while !rest.is_empty() {
-        let Some((&[name_len, lo, hi], payload)) = rest.split_first_chunk::<3>() else {
-            return Err("Invalid developer pack header");
+        let invalid = "Invalid developer pack header";
+        let (name_len, size, payload) = if wide {
+            let (&[name, a, b, c, d], payload) = rest.split_first_chunk::<5>().ok_or(invalid)?;
+            (name, u32::from_le_bytes([a, b, c, d]) as usize, payload)
+        } else {
+            let (&[name, lo, hi], payload) = rest.split_first_chunk::<3>().ok_or(invalid)?;
+            (name, u16::from_le_bytes([lo, hi]) as usize, payload)
         };
-        let size = u16::from_le_bytes([lo, hi]) as usize;
+        if size
+            > if wide {
+                storage::CAP
+            } else {
+                storage::LEGACY_CAP
+            }
+        {
+            return Err("Developer file is too large");
+        }
         let len = name_len as usize;
         let name = payload
             .get(..len)
@@ -35,15 +54,16 @@ fn entries() -> Result<Vec<(&'static str, &'static [u8])>, &'static str> {
         let content = payload
             .get(len..len + size)
             .filter(|bytes| {
-                size <= storage::CAP
-                    && if name.ends_with(".kr3") {
-                        bytes.starts_with(b"KR3\x01") && bytes.len() > 4
-                    } else {
-                        str::from_utf8(bytes).is_ok()
-                    }
+                if name.ends_with(".kr3") {
+                    bytes.starts_with(b"KR3\x01") && (5..=65_540).contains(&bytes.len())
+                } else {
+                    str::from_utf8(bytes).is_ok()
+                }
             })
             .ok_or("Invalid developer file content")?;
-        if files.len() == storage::COUNT || files.iter().any(|&(existing, _)| existing == name) {
+        if files.len() == storage::LEGACY_COUNT
+            || files.iter().any(|&(existing, _)| existing == name)
+        {
             return Err("Too many files or duplicate filenames");
         }
         files.push((name, content));
@@ -70,7 +90,22 @@ pub fn command(arg: &str, out: &mut impl Write) {
         }
         return;
     }
-    let free = unsafe { storage::FILES.iter().filter(|file| !file.used).count() };
+    let (capacity, max_size) = if storage::has_exfat() {
+        (storage::COUNT, storage::CAP)
+    } else {
+        (storage::LEGACY_COUNT, storage::LEGACY_CAP)
+    };
+    let free = capacity.saturating_sub(storage::used_slots());
+    if files
+        .iter()
+        .any(|(name, bytes)| storage::find(name).is_none() && bytes.len() > max_size)
+    {
+        let _ = writeln!(
+            out,
+            "A staged file exceeds the mounted volume's file limit."
+        );
+        return;
+    }
     let additions = files
         .iter()
         .filter(|(name, _)| storage::find(name).is_none())
@@ -78,7 +113,7 @@ pub fn command(arg: &str, out: &mut impl Write) {
     if additions > free {
         let _ = writeln!(
             out,
-            "Import requires {additions} free KFS slots. Only {free} available."
+            "Import requires {additions} free file slots. Only {free} available."
         );
         return;
     }

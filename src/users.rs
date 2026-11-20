@@ -74,7 +74,8 @@ fn decode(bytes: &[u8]) -> Option<Vec<User>> {
 }
 
 fn save(accounts: &[User]) -> bool {
-    let previous = storage::find_internal(DATABASE).map(|i| unsafe { storage::FILES[i].data });
+    let previous =
+        storage::find_internal(DATABASE).map(|i| unsafe { storage::FILES[i].data.clone() });
     let mut bytes = Vec::with_capacity(4 + accounts.len() * 68);
     bytes.extend_from_slice(MAGIC);
     for account in accounts {
@@ -89,7 +90,7 @@ fn save(accounts: &[User]) -> bool {
         return true;
     }
     if let Some(previous) = previous {
-        let _ = storage::put_internal(DATABASE, &previous.bytes[..previous.len]);
+        let _ = storage::put_internal(DATABASE, &previous.bytes[..previous.len()]);
     } else {
         storage::remove_internal(DATABASE);
     }
@@ -217,8 +218,9 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Self {
-        let snapshot = storage::find_internal(DATABASE).map(|i| unsafe { storage::FILES[i].data });
-        let users = snapshot.and_then(|data| decode(&data.bytes[..data.len]));
+        let snapshot =
+            storage::find_internal(DATABASE).map(|i| unsafe { storage::FILES[i].data.clone() });
+        let users = snapshot.as_ref().and_then(|data| decode(&data.bytes));
         Self {
             view: Some(if snapshot.is_some() {
                 View::Login

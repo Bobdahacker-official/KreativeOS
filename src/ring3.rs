@@ -1,5 +1,6 @@
 //! Native x86-64 user programs with separate mappings and an interrupt ABI.
 use crate::{hardware, text::Text};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
     arch::{asm, global_asm},
     fmt::Write,
@@ -9,8 +10,14 @@ use core::{
 
 const BASE: usize = 0x4000_0000_0000;
 const PAGE: usize = 4096;
-const STACK: usize = BASE + 3 * PAGE;
-const JOB: usize = BASE + PAGE;
+const CODE_LIMIT: usize = 16 * PAGE;
+const STACK: usize = BASE + 20 * PAGE;
+const STACK_PAGES: usize = 4;
+const HEAP: usize = BASE + 32 * PAGE;
+const HEAP_PAGES: usize = 128;
+const STACK_TOP: usize = STACK + STACK_PAGES * PAGE;
+const JOB_SLOT: usize = 18;
+const JOB_ADDRESS: usize = BASE + JOB_SLOT * PAGE;
 const PRESENT: u64 = 1;
 const WRITE: u64 = 2;
 const USER: u64 = 4;
@@ -32,20 +39,15 @@ struct KernelStack([u8; 16384]);
 #[repr(C, align(16))]
 struct FxState([u8; 512]);
 
-static mut PML4: Page = Page([0; 512]);
-static mut PDPT: Page = Page([0; 512]);
-static mut PD: Page = Page([0; 512]);
-static mut PT: Page = Page([0; 512]);
-static mut CODE: Page = Page([0; 512]);
-static mut DATA: Page = Page([0; 512]);
-static mut JOB_DATA: Page = Page([0; 512]);
 static mut GDT: Page = Page([0; 512]);
 static mut TSS: [u8; 104] = [0; 104];
 static mut IDT: [u128; 256] = [0; 256];
 static mut KSTACK: KernelStack = KernelStack([0; 16384]);
 static mut FRAME: usize = 0;
+static mut ACTIVE_CONTEXT: *mut [u64; 20] = ptr::null_mut();
+static mut ACTIVE_PROCESS: *mut Process = ptr::null_mut();
+static mut APIC_TICKS: u32 = 0;
 static mut SELECTORS: Option<(u64, u64)> = None;
-static mut OUTPUT: Text<1024> = Text::new();
 static mut KERNEL_FP: FxState = FxState([0; 512]);
 static mut USER_FP: FxState = FxState([0; 512]);
 
@@ -57,60 +59,51 @@ extern "C" {
     static kos_maintenance_job_end: u8;
 }
 extern "win64" {
-    fn kos_user_enter(cr3: u64, cs: u64, ss: u64) -> u64;
+    fn kos_user_enter(cr3: u64, context: *const [u64; 20]) -> u64;
 }
 
 global_asm!(
     ".text",
     ".globl kos_user_enter",
     "kos_user_enter:",
-    // Win64 ABI. Only volatile registers are modified on this path.
     "fxsave64 [rip + {kernel_fp}]",
     "fxrstor64 [rip + {user_fp}]",
     "mov cr3, rcx",
-    "push r8",
-    "mov rax, {stack_top}",
-    "push rax",
-    "push 0x202",
-    "push rdx",
-    "mov rax, {entry}",
-    "push rax",
-    // No register may expose values left by the kernel caller.
     "push rbx", "push rbp", "push rdi", "push rsi",
     "push r12", "push r13", "push r14", "push r15",
     "mov [rip + {frame}], rsp",
-    // Move the IRET frame below the saved kernel registers.
-    "push qword ptr [rsp + 96]",
-    "push qword ptr [rsp + 96]",
-    "push qword ptr [rsp + 96]",
-    "push qword ptr [rsp + 96]",
-    "push qword ptr [rsp + 96]",
-    "xor eax, eax", "xor ecx, ecx", "xor edx, edx",
-    "xor ebx, ebx", "xor ebp, ebp", "xor edi, edi", "xor esi, esi",
-    "xor r8d, r8d", "xor r9d, r9d", "xor r10d, r10d", "xor r11d, r11d",
-    "xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
+    // Context is ordered as fifteen registers, followed by the five IRET words.
+    "lea rax, [rdx + 152]",
+    "mov ecx, 20",
+    "1:",
+    "push qword ptr [rax]",
+    "sub rax, 8",
+    "loop 1b",
+    "pop r15", "pop r14", "pop r13", "pop r12", "pop r11", "pop r10", "pop r9", "pop r8",
+    "pop rdi", "pop rsi", "pop rbp", "pop rbx", "pop rdx", "pop rcx", "pop rax",
     "iretq",
     ".globl kos_user_syscall",
     "kos_user_syscall:",
     "cld",
-    "cmp eax, 1",
-    "je 2f",
     "test eax, eax",
-    "jne 3f",
-    "mov ecx, ebx",
-    "mov edx, 0",
-    "jmp 5f",
-    "3:",
-    "mov rax, -38",
+    "jz 2f",
+    // The Windows ABI helper may use all volatile registers and SSE registers.
+    // Preserve the user register file intact except for the syscall result in RAX.
+    "push rcx", "push rdx", "push r8", "push r9", "push r10", "push r11",
+    "fxsave64 [rip + {user_fp}]",
+    "mov ecx, eax",
+    "mov rdx, rbx",
+    "mov r8, rsi",
+    "sub rsp, 40",
+    "call {syscall}",
+    "add rsp, 40",
+    "fxrstor64 [rip + {user_fp}]",
+    "pop r11", "pop r10", "pop r9", "pop r8", "pop rdx", "pop rcx",
     "iretq",
     "2:",
-    "mov rcx, rbx",
-    "mov rdx, rsi",
-    // TSS stack is aligned, with five hardware words pushed by the CPU.
-    "sub rsp, 40",
-    "call {write}",
-    "add rsp, 40",
-    "iretq",
+    "mov ecx, ebx",
+    "xor edx, edx",
+    "jmp 5f",
     ".globl kos_user_fault",
     "kos_user_fault:",
     "cld",
@@ -120,6 +113,13 @@ global_asm!(
     ".globl kos_user_timer",
     "kos_user_timer:",
     "cld",
+    "push rax", "push rcx", "push rdx", "push rbx", "push rbp", "push rsi", "push rdi",
+    "push r8", "push r9", "push r10", "push r11", "push r12", "push r13", "push r14", "push r15",
+    "mov rsi, rsp",
+    "mov rdi, [rip + {context}]",
+    "mov ecx, 20",
+    "rep movsq",
+    "fxsave64 [rip + {user_fp}]",
     "xor ecx, ecx",
     "mov edx, 2",
     "5:",
@@ -131,14 +131,12 @@ global_asm!(
     "or rax, rcx",
     "pop r15", "pop r14", "pop r13", "pop r12",
     "pop rsi", "pop rdi", "pop rbp", "pop rbx",
-    "add rsp, 40",
     "ret",
     frame = sym FRAME,
+    context = sym ACTIVE_CONTEXT,
     kernel_fp = sym KERNEL_FP,
     user_fp = sym USER_FP,
-    write = sym syscall_write,
-    stack_top = const (STACK + PAGE),
-    entry = const BASE,
+    syscall = sym user_syscall,
 );
 
 global_asm!(
@@ -166,27 +164,225 @@ global_asm!(
     "int 0x80",
     ".globl kos_maintenance_job_end",
     "kos_maintenance_job_end:",
-    job = const JOB,
+    job = const JOB_ADDRESS,
 );
 
-extern "win64" fn syscall_write(address: usize, len: usize) -> i64 {
-    let end = address.saturating_add(len);
-    let readable =
-        (address >= BASE && end <= BASE + PAGE) || (address >= STACK && end <= STACK + PAGE);
-    if !readable || len > 512 {
-        return -14;
-    }
-    let data = unsafe { core::slice::from_raw_parts(address as *const u8, len) };
-    unsafe {
-        let available = OUTPUT.bytes.len() - OUTPUT.len;
-        for &byte in data.iter().take(available) {
-            OUTPUT.push(if byte == b'\n' || (32..127).contains(&byte) {
-                byte
-            } else {
-                b'?'
-            });
+struct Process {
+    id: u64,
+    name: Text<32>,
+    root: Box<Page>,
+    pdpt: Box<Page>,
+    pd: Box<Page>,
+    table: Box<Page>,
+    code: Vec<Box<Page>>,
+    stack: Vec<Box<Page>>,
+    job: Option<Box<Page>>,
+    heap: Vec<Box<Page>>,
+    context: [u64; 20],
+    fp: FxState,
+    output: Text<1024>,
+}
+
+impl Process {
+    fn new(id: u64, name: &str, code: &[u8], job: Option<&[u8; 32]>) -> Box<Self> {
+        let pages = code
+            .chunks(PAGE)
+            .map(|chunk| {
+                let mut page = zero_page();
+                page_bytes(&mut page)[..chunk.len()].copy_from_slice(chunk);
+                page
+            })
+            .collect();
+        let job = job.map(|state| {
+            let mut page = zero_page();
+            page_bytes(&mut page)[..state.len()].copy_from_slice(state);
+            page
+        });
+        let mut process = Box::new(Self {
+            id,
+            name: Text::new(),
+            root: zero_page(),
+            pdpt: zero_page(),
+            pd: zero_page(),
+            table: zero_page(),
+            code: pages,
+            stack: (0..STACK_PAGES).map(|_| zero_page()).collect(),
+            job,
+            heap: Vec::new(),
+            context: [0; 20],
+            fp: FxState([0; 512]),
+            output: Text::new(),
+        });
+        process.name.set(name);
+        process.fp.0[..2].copy_from_slice(&0x037fu16.to_le_bytes());
+        process.fp.0[24..28].copy_from_slice(&0x1f80u32.to_le_bytes());
+        process.context[15] = BASE as u64;
+        process.context[17] = 0x202;
+        process.context[18] = STACK_TOP as u64;
+        let rw = PRESENT | WRITE | USER;
+        process.pdpt.0[0] = address(&process.pd) | rw;
+        process.pd.0[0] = address(&process.table) | rw;
+        for (slot, page) in process.code.iter().enumerate() {
+            process.table.0[slot] = address(page) | PRESENT | USER;
         }
-        len.min(available) as i64
+        for (slot, page) in process.stack.iter().enumerate() {
+            process.table.0[(STACK - BASE) / PAGE + slot] = address(page) | rw | NX;
+        }
+        if let Some(page) = &process.job {
+            process.table.0[JOB_SLOT] = address(page) | rw | NX;
+        }
+        process
+    }
+
+    fn grow_heap(&mut self, bytes: usize) -> i64 {
+        if bytes > HEAP_PAGES * PAGE {
+            return -12;
+        }
+        for index in self.heap.len()..bytes.div_ceil(PAGE) {
+            let page = zero_page();
+            self.table.0[(HEAP - BASE) / PAGE + index] =
+                address(&page) | PRESENT | WRITE | USER | NX;
+            self.heap.push(page);
+            unsafe {
+                asm!("invlpg [{}]", in(reg) HEAP + index * PAGE, options(nostack, preserves_flags))
+            };
+        }
+        HEAP as i64
+    }
+}
+
+fn zero_page() -> Box<Page> {
+    Box::new(Page([0; 512]))
+}
+
+fn address(page: &Page) -> u64 {
+    page.0.as_ptr() as u64
+}
+
+fn page_bytes(page: &mut Page) -> &mut [u8; PAGE] {
+    unsafe { &mut *page.0.as_mut_ptr().cast() }
+}
+
+extern "win64" fn user_syscall(call: u32, first: usize, length: usize) -> i64 {
+    let process = unsafe { &mut *ACTIVE_PROCESS };
+    match call {
+        1 => {
+            let end = first.saturating_add(length);
+            let readable = (first >= BASE && end <= BASE + process.code.len() * PAGE)
+                || (first >= STACK && end <= STACK_TOP)
+                || (first >= HEAP && end <= HEAP + process.heap.len() * PAGE);
+            if !readable || length > 512 {
+                return -14;
+            }
+            let data = unsafe { core::slice::from_raw_parts(first as *const u8, length) };
+            let available = process.output.bytes.len() - process.output.len;
+            for &byte in data.iter().take(available) {
+                process
+                    .output
+                    .push(if byte == b'\n' || (32..127).contains(&byte) {
+                        byte
+                    } else {
+                        b'?'
+                    });
+            }
+            length.min(available) as i64
+        }
+        2 => process.grow_heap(first),
+        _ => -38,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Slice {
+    Exited(u32),
+    Faulted,
+    Preempted,
+}
+
+pub struct Scheduler {
+    ready: VecDeque<Box<Process>>,
+    next_id: u64,
+}
+
+impl Scheduler {
+    pub fn new() -> Self {
+        Self {
+            ready: VecDeque::new(),
+            next_id: 1,
+        }
+    }
+
+    pub fn spawn(&mut self, name: &str, binary: &[u8]) -> Result<u64, &'static str> {
+        let code = binary
+            .strip_prefix(b"KR3\x01")
+            .filter(|code| !code.is_empty() && code.len() <= CODE_LIMIT)
+            .ok_or("Invalid KR3 executable or code exceeds 64 KiB")?;
+        if self.ready.len() >= 8 {
+            return Err("The session already has eight active processes");
+        }
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .ok_or("Process identifiers exhausted")?;
+        self.ready.push_back(Process::new(id, name, code, None));
+        Ok(id)
+    }
+
+    pub fn list(&self, out: &mut impl Write) {
+        if self.ready.is_empty() {
+            let _ = writeln!(out, "No running programs");
+        }
+        for process in &self.ready {
+            let _ = writeln!(
+                out,
+                "{}  {}  {} KiB heap",
+                process.id,
+                process.name.str(),
+                process.heap.len() * 4
+            );
+        }
+    }
+
+    pub fn kill(&mut self, id: u64) -> bool {
+        let index = self.ready.iter().position(|process| process.id == id);
+        index.and_then(|index| self.ready.remove(index)).is_some()
+    }
+
+    pub fn clear(&mut self) {
+        self.ready.clear();
+    }
+
+    pub fn step(&mut self, out: &mut Text<4096>) -> bool {
+        let Some(mut process) = self.ready.pop_front() else {
+            return false;
+        };
+        let result = run_slice(&mut process);
+        let changed = !process.output.str().is_empty() || !matches!(result, Ok(Slice::Preempted));
+        if changed && out.len > 3000 {
+            out.clear();
+        }
+        if process.output.len != 0 {
+            let _ = write!(out, "\n[{}] {}", process.id, process.output.str());
+            process.output.clear();
+        }
+        match result {
+            Ok(Slice::Preempted) => self.ready.push_back(process),
+            Ok(Slice::Exited(status)) => {
+                let _ = writeln!(out, "\n[{}] Exited ({status})", process.id);
+                let mut line = Text::<64>::new();
+                let _ = write!(line, "KreativeOS: user exit {status}\r\n");
+                unsafe { hardware::log(line.str().as_bytes()) };
+            }
+            Ok(Slice::Faulted) => {
+                let _ = writeln!(out, "\n[{}] Stopped on a CPU exception", process.id);
+                unsafe { hardware::log(b"KreativeOS: user CPU exception\r\n") };
+            }
+            Err(error) => {
+                let _ = writeln!(out, "\n[{}] {error}", process.id);
+            }
+        }
+        changed
     }
 }
 
@@ -258,24 +454,17 @@ fn gate(handler: usize, cs: u16, user: bool) -> u128 {
         | ((address >> 32) << 64)
 }
 
-pub fn run(binary: &[u8], out: &mut impl Write) -> Result<(), &'static str> {
-    let program = binary
-        .strip_prefix(b"KR3\x01")
-        .filter(|body| !body.is_empty() && body.len() <= PAGE)
-        .ok_or("Invalid KR3 executable")?;
-    run_program(program, out, None).map(|_| ())
-}
-
 pub(crate) fn run_maintenance(state: &mut [u8; 32]) -> Result<(), &'static str> {
     unsafe {
         let first = ptr::addr_of!(kos_maintenance_job);
-        let last = ptr::addr_of!(kos_maintenance_job_end);
-        let size = (last as usize).saturating_sub(first as usize);
+        let size = (ptr::addr_of!(kos_maintenance_job_end) as usize).saturating_sub(first as usize);
         if !(1..=PAGE).contains(&size) {
             return Err("Invalid built-in maintenance task");
         }
         let program = core::slice::from_raw_parts(first, size);
-        if run_program(program, &mut Text::<1>::new(), Some(state))? == 0 {
+        let mut process = Process::new(0, "system1", program, Some(state));
+        if matches!(run_slice(&mut process)?, Slice::Exited(0)) {
+            state.copy_from_slice(&page_bytes(process.job.as_mut().unwrap())[..32]);
             Ok(())
         } else {
             Err("The maintenance task stopped before completing")
@@ -283,11 +472,7 @@ pub(crate) fn run_maintenance(state: &mut [u8; 32]) -> Result<(), &'static str> 
     }
 }
 
-fn run_program(
-    program: &[u8],
-    out: &mut impl Write,
-    job: Option<&mut [u8; 32]>,
-) -> Result<u64, &'static str> {
+fn run_slice(process: &mut Process) -> Result<Slice, &'static str> {
     unsafe {
         if core::arch::x86_64::__cpuid(1).edx & (1 << 9) == 0
             || core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 20) == 0
@@ -309,26 +494,13 @@ fn run_program(
             return Err("User address range is already mapped");
         }
         let (cs_user, ss_user) = user_segments().ok_or("No GDT space available")?;
-        for (dest, &original) in PML4.0.iter_mut().zip(root) {
+        for (dest, &original) in process.root.0.iter_mut().zip(root) {
             *dest = original & !USER;
         }
-        PML4.0[index] = PDPT.0.as_ptr() as u64 | PRESENT | WRITE | USER;
-        PDPT.0[0] = PD.0.as_ptr() as u64 | PRESENT | WRITE | USER;
-        PD.0[0] = PT.0.as_ptr() as u64 | PRESENT | WRITE | USER;
-        PT.0[0] = CODE.0.as_ptr() as u64 | PRESENT | USER;
-        PT.0[3] = DATA.0.as_ptr() as u64 | PRESENT | WRITE | USER | NX;
-        PT.0[1] = 0;
-        if let Some(state) = job.as_deref() {
-            JOB_DATA.0.fill(0);
-            PT.0[1] = JOB_DATA.0.as_ptr() as u64 | PRESENT | WRITE | USER | NX;
-            ptr::copy_nonoverlapping(state.as_ptr(), JOB_DATA.0.as_mut_ptr().cast(), state.len());
-        }
-        CODE.0.fill(0);
-        DATA.0.fill(0);
-        ptr::copy_nonoverlapping(program.as_ptr(), CODE.0.as_mut_ptr().cast(), program.len());
-        OUTPUT.clear();
-        USER_FP.0[..2].copy_from_slice(&0x037fu16.to_le_bytes());
-        USER_FP.0[24..28].copy_from_slice(&0x1f80u32.to_le_bytes());
+        process.root.0[index] = address(&process.pdpt) | PRESENT | WRITE | USER;
+        process.context[16] = cs_user;
+        process.context[19] = ss_user;
+        USER_FP.0.copy_from_slice(&process.fp.0);
 
         let mut old_idt = Table { limit: 0, base: 0 };
         let cs: u16;
@@ -353,31 +525,36 @@ fn run_program(
         let count = apic.read(0x390);
         apic.write(0xf0, svr | 0x100);
         apic.write(0x320, TIMER as u32 | (1 << 16));
-        apic.write(0x3e0, 3); // Divide the APIC timer clock by 16.
-        apic.write(0x380, u32::MAX);
-        let before = hardware::millis();
-        while hardware::millis() < before + 4 {
-            core::hint::spin_loop();
+        apic.write(0x3e0, 3);
+        if APIC_TICKS == 0 {
+            apic.write(0x380, u32::MAX);
+            let before = hardware::millis();
+            while hardware::millis() < before + 4 {
+                core::hint::spin_loop();
+            }
+            APIC_TICKS = u32::MAX - apic.read(0x390);
         }
-        let ticks = u32::MAX - apic.read(0x390);
-        if ticks == 0 {
+        if APIC_TICKS == 0 {
             apic.write(0x320, lvt);
             apic.write(0x3e0, divide);
             apic.write(0x380, count);
             apic.write(0xf0, svr);
             return Err("APIC timer could not be calibrated");
         }
-        wrmsr(0xc000_0080, (saved_efer | (1 << 11)) & !1); // NX on; SYSCALL disabled.
+        wrmsr(0xc000_0080, (saved_efer | (1 << 11)) & !1);
         if has_sysenter {
             wrmsr(0x174, 0);
         }
-        // Flush global firmware translations and restrict user arithmetic to the saved x87/SSE state.
         let user_cr4 = cr4 & !((1 << 7) | (1 << 16) | (1 << 18));
         asm!("mov cr4, {}", "lidt [{}]", in(reg) user_cr4, in(reg) &idt, options(nostack));
+        ACTIVE_CONTEXT = &mut process.context;
+        ACTIVE_PROCESS = process;
         apic.write(0x320, TIMER as u32);
-        apic.write(0x380, ticks.saturating_mul(63));
-        let result = kos_user_enter(PML4.0.as_ptr() as u64, cs_user, ss_user);
+        apic.write(0x380, APIC_TICKS.saturating_mul(2));
+        let result = kos_user_enter(address(&process.root), ptr::addr_of!(process.context));
         asm!("cli", "mov cr3, {}", "lidt [{}]", in(reg) cr3, in(reg) &old_idt, options(nostack));
+        ACTIVE_PROCESS = ptr::null_mut();
+        ACTIVE_CONTEXT = ptr::null_mut();
         apic.write(0x320, lvt | (1 << 16));
         apic.write(0x380, 0);
         if result >> 32 == 2 {
@@ -395,34 +572,13 @@ fn run_program(
         asm!("mov fs, {0:x}", "mov gs, {1:x}", in(reg) fs_selector, in(reg) gs_selector, options(nostack));
         wrmsr(0xc000_0100, fs);
         wrmsr(0xc000_0101, gs);
-        if let Some(state) = job {
-            if result == 0 {
-                ptr::copy_nonoverlapping(
-                    JOB_DATA.0.as_ptr().cast(),
-                    state.as_mut_ptr(),
-                    state.len(),
-                );
-            }
-            JOB_DATA.0.fill(0);
-            return Ok(result);
-        }
-        let _ = write!(out, "{}", OUTPUT.str());
-        match result >> 32 {
-            0 => {
-                let mut status = Text::<48>::new();
-                let _ = write!(status, "KreativeOS: user exit {}\r\n", result as u32);
-                hardware::log(status.str().as_bytes());
-                let _ = writeln!(out, "\nUser process exited ({})", result as u32);
-            }
-            1 => {
-                hardware::log(b"KreativeOS: user CPU exception\r\n");
-                let _ = writeln!(out, "\nUser process stopped on a CPU exception");
-            }
+        Ok(match result >> 32 {
+            0 => Slice::Exited(result as u32),
+            1 => Slice::Faulted,
             _ => {
-                hardware::log(b"KreativeOS: user CPU time limit\r\n");
-                let _ = writeln!(out, "\nUser process reached its CPU time limit");
+                process.fp.0.copy_from_slice(&USER_FP.0);
+                Slice::Preempted
             }
-        }
-        Ok(result)
+        })
     }
 }
