@@ -15,6 +15,7 @@ const LEGACY_MAGIC: &[u8; 4] = b"KUA1";
 const LIMIT: usize = 12;
 const LEGACY_ROUNDS: u32 = 100_000;
 const ROUNDS: u32 = 600_000;
+pub const SYSTEM_NAME: &str = "system1";
 
 pub fn is_database(name: &str) -> bool {
     name.eq_ignore_ascii_case(DATABASE)
@@ -210,6 +211,7 @@ pub struct Session {
     message: &'static str,
     blocked_until: u64,
     current: Option<usize>,
+    system: bool,
     confirm_disk_write: bool,
 }
 
@@ -232,6 +234,7 @@ impl Session {
             message: "",
             blocked_until: 0,
             current: None,
+            system: false,
             confirm_disk_write: false,
         }
     }
@@ -265,13 +268,34 @@ impl Session {
         self.current
     }
 
+    pub fn system(&self) -> bool {
+        self.system
+    }
+
+    pub fn enter_system(&mut self) -> bool {
+        if !self.administrator() || self.system || self.view.is_some() {
+            return false;
+        }
+        self.system = true;
+        true
+    }
+
     pub fn administrator(&self) -> bool {
         self.current == Some(0)
     }
 
     pub fn name(&self) -> &str {
-        self.current
-            .map_or("", |index| self.users[index].name.str())
+        if self.system {
+            return SYSTEM_NAME;
+        }
+        self.current.map_or("", |index| {
+            let name = self.users[index].name.str();
+            if name == SYSTEM_NAME {
+                "system1 (local)"
+            } else {
+                name
+            }
+        })
     }
 
     pub fn standard_name(&self) -> Option<Text<16>> {
@@ -287,7 +311,7 @@ impl Session {
     }
 
     pub fn change_password(&mut self) {
-        if self.current.is_some() {
+        if self.current.is_some() && !self.system {
             self.show(View::Password);
         }
     }
@@ -351,6 +375,7 @@ impl Session {
         if self.current.take().is_none() {
             return false;
         }
+        self.system = false;
         self.show(View::Login);
         unsafe { hardware::log(b"KreativeOS: signed out\r\n") };
         true
@@ -405,10 +430,15 @@ impl Session {
             self.message = "Wait before trying again";
             return;
         }
-        let account = self
-            .users
-            .iter()
-            .position(|user| user.name.str() == self.entered_name.str());
+        let account = self.users.iter().position(|user| {
+            let name = user.name.str();
+            let login = if name == SYSTEM_NAME {
+                "local:system1"
+            } else {
+                name
+            };
+            login == self.entered_name.str()
+        });
         let user = self.users[account.unwrap_or(0)];
         let key = password_key(self.password.str().as_bytes(), &user.salt, user.rounds);
         let difference = key
@@ -467,6 +497,12 @@ impl Session {
             None
         };
         let label = changing.map_or(self.entered_name, |index| self.users[index].name);
+        if changing.is_none() && label.str() == SYSTEM_NAME {
+            self.message = "This name is reserved for the system service.";
+            self.field = 0;
+            self.clear_passwords();
+            return;
+        }
         if !valid_name(label.str())
             || (changing.is_none()
                 && (self.users.len() >= LIMIT

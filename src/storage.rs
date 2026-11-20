@@ -2,6 +2,8 @@
 use crate::{hardware::*, text::Text};
 pub const COUNT: usize = 24;
 pub const CAP: usize = 2048;
+pub const LOCAL_NAME_CAP: usize = 32;
+pub const DISK_NAME_CAP: usize = LOCAL_NAME_CAP + 18;
 const SNAP: usize = 512 * 100;
 const SNAP_SECTORS: usize = SNAP / 512;
 const SNAP_A: u32 = 2048;
@@ -61,7 +63,7 @@ pub unsafe fn identity_mmio(address: usize) -> bool {
 }
 #[derive(Clone, Copy)]
 pub struct File {
-    pub name: Text<32>,
+    pub name: Text<DISK_NAME_CAP>,
     pub data: Text<CAP>,
     pub used: bool,
 }
@@ -94,10 +96,10 @@ fn standard_account() -> Option<Text<16>> {
     unsafe { STANDARD_ACCOUNT }
 }
 
-fn scoped_name(name: &str) -> Option<Text<32>> {
+fn scoped_name(name: &str) -> Option<Text<DISK_NAME_CAP>> {
     let mut path = Text::new();
     if let Some(owner) = standard_account() {
-        if owner.len + name.len() + 2 > path.bytes.len() {
+        if name.len() > LOCAL_NAME_CAP {
             return None;
         }
         path.push(b'@');
@@ -204,6 +206,18 @@ pub fn can_write() -> bool {
                 ..
             })
         )
+    }
+}
+
+pub(crate) fn scrub_free(cursor: &mut u32, budget: u8) -> Result<bool, &'static str> {
+    if !can_write() {
+        return Err("A writable exFAT data volume is required");
+    }
+    unsafe {
+        EXFAT
+            .as_ref()
+            .ok_or("A writable exFAT data volume is required")?
+            .scrub_free(cursor, budget)
     }
 }
 
@@ -630,8 +644,8 @@ pub fn load_draft() -> Option<(Text<32>, Text<CAP>)> {
     }
 }
 
-pub fn store_draft(name: &Text<32>, data: &Text<CAP>) -> bool {
-    if standard_account().is_some() {
+pub fn store_draft(name: &str, data: &Text<CAP>) -> bool {
+    if standard_account().is_some() || name.len() > LOCAL_NAME_CAP {
         return false;
     }
     unsafe {
@@ -642,9 +656,9 @@ pub fn store_draft(name: &Text<32>, data: &Text<CAP>) -> bool {
         let mut record = [0; 512 * DRAFT_SECTORS];
         record[..4].copy_from_slice(b"KDR1");
         record[4..8].copy_from_slice(&next.to_le_bytes());
-        record[12] = name.len as u8;
+        record[12] = name.len() as u8;
         record[13..17].copy_from_slice(&(data.len as u32).to_le_bytes());
-        record[17..17 + name.len].copy_from_slice(&name.bytes[..name.len]);
+        record[17..17 + name.len()].copy_from_slice(name.as_bytes());
         record[512..512 + data.len].copy_from_slice(&data.bytes[..data.len]);
         let hash = checksum(&record[12..]);
         record[8..12].copy_from_slice(&hash.to_le_bytes());
@@ -667,10 +681,10 @@ pub fn find(name: &str) -> Option<usize> {
     let scoped = scoped_name(name).and_then(|path| find_internal(path.str()));
     scoped.or_else(|| {
         let owner = standard_account()?;
-        if !name.ends_with(".kr3") || name.len() + owner.len + 1 > 32 {
+        if !name.ends_with(".kr3") || name.len() > LOCAL_NAME_CAP {
             return None;
         }
-        let mut path = Text::<32>::new();
+        let mut path = Text::<DISK_NAME_CAP>::new();
         path.append(owner.str());
         path.push(b'.');
         path.append(name);
@@ -696,7 +710,14 @@ pub fn put(name: &str, data: &[u8]) -> Result<(), &'static str> {
 }
 pub(crate) fn put_internal(name: &str, data: &[u8]) -> Result<(), &'static str> {
     if name.is_empty()
-        || name.len() > 32
+        || name.len()
+            > unsafe {
+                if EXFAT.is_some() {
+                    DISK_NAME_CAP
+                } else {
+                    LOCAL_NAME_CAP
+                }
+            }
         || data.len() > CAP
         || !name.is_ascii()
         || name.contains('/')

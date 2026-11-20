@@ -167,6 +167,10 @@ New passwords use PBKDF2-HMAC-SHA-256 with 600,000 iterations and a fresh 128-bi
 
 Both account types open the desktop. Standard accounts have separate file and application settings, and Terminal runs their own KR3 executables. Administration, system networking changes and restart require the administrator. The KR3 runner maps executable code and a writable, non-executable stack into CPU ring 3. An invalid memory access or a CPU exception stops the program. The local APIC timer limits each run to roughly 250 ms.
 
+On exFAT, each standard account gets the full 32-character local filename allowance. The storage prefix is separate from that limit. When a file is replaced or removed, the exFAT driver clears the retired data clusters before making them available for reuse.
+
+An administrator can open the built-in maintenance desktop by typing `system1` directly in Terminal. The service has no ordinary sign-in. Its ring-3 worker updates the peak heap measurement and prepares the budget for a free-space scrub. In the maintenance desktop, `service` shows the worker and scrub status, `scrub free` starts a scan of free clusters on the mounted writable exFAT volume, and `scrub cancel` stops it. `memory set N` changes the live service-owned scrub budget to 1–8 clusters per worker run. Use `lock` to return to sign-in. An account created with the old username `system1` uses `local:system1` at sign-in and retains its original role.
+
 Build the example with NASM:
 
 ```sh

@@ -191,7 +191,7 @@ struct Tab {
 }
 enum SearchTarget {
     App(usize),
-    File(Text<32>),
+    File(Text<{ storage::DISK_NAME_CAP }>),
     Web(alloc::boxed::Box<Text<384>>),
 }
 
@@ -307,7 +307,7 @@ struct Desktop {
     drag: Option<(usize, i32, i32)>,
     accent: u32,
     note: Text<2048>,
-    filename: Text<32>,
+    filename: Text<{ storage::DISK_NAME_CAP }>,
     draft_at: Option<u64>,
     file_search: Text<48>,
     file_cursor: usize,
@@ -515,7 +515,7 @@ impl Desktop {
                 saved.bytes[..saved.len] == note.bytes[..note.len]
             });
             if !already_saved {
-                d.filename = name;
+                d.filename.set(name.str());
                 d.note = note;
                 d.open(1);
                 d.notice.set("Recovered an unsaved draft");
@@ -640,7 +640,7 @@ impl Desktop {
             }
         }
     }
-    fn open_file(&mut self, name: Text<32>) {
+    fn open_file(&mut self, name: Text<{ storage::DISK_NAME_CAP }>) {
         let Some(index) = storage::find(name.str()) else {
             return;
         };
@@ -1031,20 +1031,16 @@ impl Desktop {
         self.scroll = 0
     }
     fn save(&mut self) {
-        self.notice.set(
-            if storage::put(self.filename.str(), &self.note.bytes[..self.note.len]).is_ok() {
-                if storage::sync() {
-                    if self.draft_at.take().is_some() {
-                        storage::store_draft(&self.filename, &self.note);
-                    }
-                    "Saved to disk"
-                } else {
-                    "Saved in memory; data disk unavailable"
+        match storage::put(self.filename.str(), &self.note.bytes[..self.note.len]) {
+            Ok(()) if storage::sync() => {
+                if self.draft_at.take().is_some() {
+                    storage::store_draft(self.filename.str(), &self.note);
                 }
-            } else {
-                "Save failed"
-            },
-        )
+                self.notice.set("Saved to disk");
+            }
+            Ok(()) => self.notice.set("Saved in memory; data disk unavailable"),
+            Err(error) => self.notice.set(error),
+        }
     }
     fn checkpoint_draft(&mut self, now: bool) {
         if self
@@ -1052,7 +1048,7 @@ impl Desktop {
             .is_some_and(|at| now || hardware::millis() >= at)
         {
             self.draft_at = None;
-            if storage::store_draft(&self.filename, &self.note) {
+            if storage::store_draft(self.filename.str(), &self.note) {
                 unsafe { hardware::log(b"KreativeOS: note draft saved\r\n") };
             }
         }
@@ -1618,6 +1614,18 @@ impl Desktop {
                         );
                     }
                 }
+                if self.users.system() {
+                    let mut summary = Text::<240>::new();
+                    crate::system1::status(&mut summary);
+                    s.wrapped_small(
+                        left,
+                        top + 245,
+                        layout.width,
+                        (h - layout.y - 275).max(0),
+                        summary.str(),
+                        INK,
+                    );
+                }
             }
             2 => {
                 s.text(left, top, "Accessibility", INK, 2);
@@ -1643,7 +1651,9 @@ impl Desktop {
                 s.text(
                     left,
                     top + 73,
-                    if admin {
+                    if self.users.system() {
+                        "System maintenance"
+                    } else if admin {
                         "Administrator"
                     } else {
                         "Standard account"
@@ -1693,6 +1703,15 @@ impl Desktop {
         self.terminal.append(line);
         self.terminal.push(b'\n');
         let (verb, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
+        if matches!(verb, "service" | "scrub" | "memory") {
+            if self.users.system() && allow_script {
+                crate::system1::command(verb, arg, &mut self.terminal);
+            } else {
+                self.terminal
+                    .append("An interactive system1 session is required");
+            }
+            return;
+        }
         if !self.users.administrator()
             && matches!(
                 verb,
@@ -1708,7 +1727,7 @@ impl Desktop {
  "cat"=>{if let Some(i)=storage::find(arg){unsafe{self.terminal.append(storage::FILES[i].data.str())}}else{self.terminal.append("File not found")}},
  "touch"=>{match storage::put(arg,b""){Ok(())=>{self.terminal.append(if storage::sync(){"Created on disk"}else{"Created in memory"})},Err(e)=>self.terminal.append(e)}},
  "rm"=>{if storage::remove(arg){self.terminal.append(if storage::sync(){"Removed from disk"}else{"Removed from memory"})}else{self.terminal.append("File not found")}},
- "edit"=>{if arg.is_empty() || arg.len() > 32 || !arg.is_ascii() || arg.contains(['/', '\\']) {
+ "edit"=>{if arg.is_empty() || arg.len() > if self.users.administrator() { storage::DISK_NAME_CAP } else { storage::LOCAL_NAME_CAP } || !arg.is_ascii() || arg.contains(['/', '\\']) {
    self.terminal.append("Enter a valid file name");
  } else {
    self.checkpoint_draft(true);
@@ -1732,6 +1751,12 @@ impl Desktop {
  "sdk"=>self.package_install(1, true),
  "dev"=>crate::developer::command(arg, &mut self.terminal),
  "accounts" if allow_script=>self.users.manage(arg, &mut self.terminal),
+ "system1" if allow_script && arg.is_empty() => {
+     self.checkpoint_draft(true);
+     if !self.users.enter_system() {
+         self.terminal.append("A signed-in administrator must open system1");
+     }
+ },
  "passwd" if allow_script => self.users.change_password(),
  "lock" | "logout" if allow_script=>{
      self.checkpoint_draft(true);
@@ -3377,7 +3402,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
     loop {
         for _ in 0..32 {
             if let Some(e) = input.poll() {
-                let previous_account = desktop.users.current();
+                let previous_account = (desktop.users.current(), desktop.users.system());
                 match e {
                     Event::Key(k) => {
                         desktop.key(k, &mut network);
@@ -3399,7 +3424,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
                         }
                     }
                 }
-                if desktop.users.current() != previous_account {
+                if (desktop.users.current(), desktop.users.system()) != previous_account {
                     crate::audio::stop();
                     network.clear_browser_session();
                     if desktop.users.current().is_some() {
@@ -3410,6 +3435,13 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
                         desktop = Desktop::new(s.w, s.h, users);
                         (desktop.mx, desktop.my, desktop.buttons) = pointer;
                         unsafe { PAINT.fill(0xf2f0e9) };
+                        if desktop.users.system() {
+                            desktop.settings_page = 1;
+                            desktop.open(9);
+                            desktop.open(2);
+                            desktop.terminal.set("System maintenance\nservice | scrub free | scrub cancel | memory set N\n");
+                            unsafe { hardware::log(b"KreativeOS: system1 desktop ready\r\n") };
+                        }
                         unsafe { hardware::log(b"KreativeOS: graphical session ready\r\n") };
                     }
                     dirty = true;
@@ -3417,6 +3449,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
             }
         }
         desktop.checkpoint_draft(false);
+        crate::system1::tick(hardware::millis());
         network.poll();
         if network.tls_pending {
             desktop.draw(&mut s, &network);

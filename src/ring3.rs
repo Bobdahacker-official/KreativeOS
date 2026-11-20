@@ -10,6 +10,7 @@ use core::{
 const BASE: usize = 0x4000_0000_0000;
 const PAGE: usize = 4096;
 const STACK: usize = BASE + 3 * PAGE;
+const JOB: usize = BASE + PAGE;
 const PRESENT: u64 = 1;
 const WRITE: u64 = 2;
 const USER: u64 = 4;
@@ -37,6 +38,7 @@ static mut PD: Page = Page([0; 512]);
 static mut PT: Page = Page([0; 512]);
 static mut CODE: Page = Page([0; 512]);
 static mut DATA: Page = Page([0; 512]);
+static mut JOB_DATA: Page = Page([0; 512]);
 static mut GDT: Page = Page([0; 512]);
 static mut TSS: [u8; 104] = [0; 104];
 static mut IDT: [u128; 256] = [0; 256];
@@ -51,6 +53,8 @@ extern "C" {
     fn kos_user_syscall();
     fn kos_user_fault();
     fn kos_user_timer();
+    static kos_maintenance_job: u8;
+    static kos_maintenance_job_end: u8;
 }
 extern "win64" {
     fn kos_user_enter(cr3: u64, cs: u64, ss: u64) -> u64;
@@ -135,6 +139,34 @@ global_asm!(
     write = sym syscall_write,
     stack_top = const (STACK + PAGE),
     entry = const BASE,
+);
+
+global_asm!(
+    ".text",
+    ".globl kos_maintenance_job",
+    "kos_maintenance_job:",
+    "mov rdx, {job}",
+    "mov rax, [rdx + 8]",
+    "cmp rax, [rdx + 16]",
+    "jbe 1f",
+    "mov [rdx + 16], rax",
+    "1:",
+    "movzx eax, byte ptr [rdx]",
+    "test eax, eax",
+    "jnz 3f",
+    "mov eax, 1",
+    "3:",
+    "cmp eax, 8",
+    "jbe 2f",
+    "mov eax, 8",
+    "2:",
+    "mov byte ptr [rdx + 24], al",
+    "xor eax, eax",
+    "xor ebx, ebx",
+    "int 0x80",
+    ".globl kos_maintenance_job_end",
+    "kos_maintenance_job_end:",
+    job = const JOB,
 );
 
 extern "win64" fn syscall_write(address: usize, len: usize) -> i64 {
@@ -231,6 +263,31 @@ pub fn run(binary: &[u8], out: &mut impl Write) -> Result<(), &'static str> {
         .strip_prefix(b"KR3\x01")
         .filter(|body| !body.is_empty() && body.len() <= PAGE)
         .ok_or("Invalid KR3 executable")?;
+    run_program(program, out, None).map(|_| ())
+}
+
+pub(crate) fn run_maintenance(state: &mut [u8; 32]) -> Result<(), &'static str> {
+    unsafe {
+        let first = ptr::addr_of!(kos_maintenance_job);
+        let last = ptr::addr_of!(kos_maintenance_job_end);
+        let size = (last as usize).saturating_sub(first as usize);
+        if !(1..=PAGE).contains(&size) {
+            return Err("Invalid built-in maintenance task");
+        }
+        let program = core::slice::from_raw_parts(first, size);
+        if run_program(program, &mut Text::<1>::new(), Some(state))? == 0 {
+            Ok(())
+        } else {
+            Err("The maintenance task stopped before completing")
+        }
+    }
+}
+
+fn run_program(
+    program: &[u8],
+    out: &mut impl Write,
+    job: Option<&mut [u8; 32]>,
+) -> Result<u64, &'static str> {
     unsafe {
         if core::arch::x86_64::__cpuid(1).edx & (1 << 9) == 0
             || core::arch::x86_64::__cpuid(0x8000_0001).edx & (1 << 20) == 0
@@ -260,6 +317,12 @@ pub fn run(binary: &[u8], out: &mut impl Write) -> Result<(), &'static str> {
         PD.0[0] = PT.0.as_ptr() as u64 | PRESENT | WRITE | USER;
         PT.0[0] = CODE.0.as_ptr() as u64 | PRESENT | USER;
         PT.0[3] = DATA.0.as_ptr() as u64 | PRESENT | WRITE | USER | NX;
+        PT.0[1] = 0;
+        if let Some(state) = job.as_deref() {
+            JOB_DATA.0.fill(0);
+            PT.0[1] = JOB_DATA.0.as_ptr() as u64 | PRESENT | WRITE | USER | NX;
+            ptr::copy_nonoverlapping(state.as_ptr(), JOB_DATA.0.as_mut_ptr().cast(), state.len());
+        }
         CODE.0.fill(0);
         DATA.0.fill(0);
         ptr::copy_nonoverlapping(program.as_ptr(), CODE.0.as_mut_ptr().cast(), program.len());
@@ -332,6 +395,17 @@ pub fn run(binary: &[u8], out: &mut impl Write) -> Result<(), &'static str> {
         asm!("mov fs, {0:x}", "mov gs, {1:x}", in(reg) fs_selector, in(reg) gs_selector, options(nostack));
         wrmsr(0xc000_0100, fs);
         wrmsr(0xc000_0101, gs);
+        if let Some(state) = job {
+            if result == 0 {
+                ptr::copy_nonoverlapping(
+                    JOB_DATA.0.as_ptr().cast(),
+                    state.as_mut_ptr(),
+                    state.len(),
+                );
+            }
+            JOB_DATA.0.fill(0);
+            return Ok(result);
+        }
         let _ = write!(out, "{}", OUTPUT.str());
         match result >> 32 {
             0 => {
@@ -349,6 +423,6 @@ pub fn run(binary: &[u8], out: &mut impl Write) -> Result<(), &'static str> {
                 let _ = writeln!(out, "\nUser process reached its CPU time limit");
             }
         }
+        Ok(result)
     }
-    Ok(())
 }

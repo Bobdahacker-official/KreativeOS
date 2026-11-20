@@ -184,7 +184,7 @@ impl Geometry {
 
 #[derive(Clone)]
 struct Entry {
-    name: crate::text::Text<32>,
+    name: crate::text::Text<{ storage::DISK_NAME_CAP }>,
     offset: usize,
     cluster: u32,
     len: usize,
@@ -199,7 +199,7 @@ pub struct Volume {
     bitmap: Vec<u8>,
     bitmap_chain: Vec<u32>,
     metadata: Vec<u32>,
-    tracked: Vec<crate::text::Text<32>>,
+    tracked: Vec<crate::text::Text<{ storage::DISK_NAME_CAP }>>,
     healthy: bool,
 }
 
@@ -230,7 +230,7 @@ fn hash(name: &str) -> u16 {
 
 pub fn valid_name(name: &str) -> bool {
     !name.is_empty()
-        && name.len() <= 32
+        && name.len() <= storage::DISK_NAME_CAP
         && !name.ends_with(['.', ' '])
         && name
             .bytes()
@@ -389,7 +389,7 @@ impl Volume {
             }
             let mut name = crate::text::Text::new();
             let mut scanned = 0;
-            let mut ascii = name_len <= 32;
+            let mut ascii = name_len <= storage::DISK_NAME_CAP;
             for row in set[64..].chunks_exact(32) {
                 if row[0] != 0xc1 {
                     return None;
@@ -725,7 +725,9 @@ impl Volume {
                 return false;
             }
         }
-        if !self.set_allocation(&old_chain, false) {
+        // Publish the new directory entry before destroying the old contents.
+        // Keep the old clusters allocated if any zeroing write fails.
+        if !self.zero_clusters(&old_chain) || !self.set_allocation(&old_chain, false) {
             return false;
         }
         self.healthy = self.dirty(false);
@@ -759,5 +761,42 @@ impl Volume {
 
     pub fn save_draft(&mut self, data: &[u8]) -> bool {
         self.update(DRAFT, Some(data))
+    }
+
+    fn zero_clusters(&self, chain: &[u32]) -> bool {
+        if chain.is_empty() {
+            return true;
+        }
+        let sectors = self.geometry.spc as usize;
+        let chunk = sectors.min(16);
+        let mut zeros = alloc::vec![0; chunk * self.geometry.sector];
+        chain.iter().all(|&cluster| {
+            (0..sectors).step_by(chunk).all(|offset| {
+                let bytes = (sectors - offset).min(chunk) * self.geometry.sector;
+                storage::blocks(
+                    self.geometry.lba(cluster) + offset as u64,
+                    &mut zeros[..bytes],
+                    true,
+                )
+            })
+        })
+    }
+
+    pub(crate) fn scrub_free(&self, cursor: &mut u32, budget: u8) -> Result<bool, &'static str> {
+        if !self.healthy {
+            return Err("The data volume needs a filesystem check");
+        }
+        let end = (self.geometry.clusters + 2).min(cursor.saturating_add(32));
+        let mut wiped = 0;
+        while *cursor < end && wiped < budget.clamp(1, 8) {
+            if !self.allocated(*cursor) {
+                if !self.zero_clusters(&[*cursor]) {
+                    return Err("A free-cluster write failed");
+                }
+                wiped += 1;
+            }
+            *cursor += 1;
+        }
+        Ok(*cursor == self.geometry.clusters + 2)
     }
 }
