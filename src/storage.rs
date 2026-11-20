@@ -587,6 +587,18 @@ pub fn put(name: &str, data: &[u8]) -> Result<(), &'static str> {
     }
     Ok(())
 }
+pub fn store_file(name: &str, data: &[u8]) -> bool {
+    if put(name, data).is_err() {
+        return false;
+    }
+    unsafe {
+        if let Some(volume) = &mut EXFAT {
+            return volume.update(name, Some(data));
+        }
+    }
+    sync()
+}
+
 pub fn remove(name: &str) -> bool {
     if let Some(i) = find(name) {
         unsafe { FILES[i] = File::new() }

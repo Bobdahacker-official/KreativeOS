@@ -10,6 +10,13 @@ static mut IMAGE_CACHE: Vec<(usize, i32, i32, Pixmap)> = Vec::new();
 static mut FONT: Vec<u8> = Vec::new();
 static mut INK_BOUNDS: [(i32, i32, i32, i32); 380] = [(0, 0, 0, 0); 380];
 static mut WALLPAPER: Vec<u32> = Vec::new();
+static mut WALLPAPER_KEY: (usize, usize, usize) = (0, 0, 0);
+pub const DESK_PALETTES: [[u32; 4]; 4] = [
+    [0x173850, 0x4e8fb3, 0x254a97, 0x91d9ec],
+    [0x24203f, 0x836c9f, 0x51448f, 0xe5b4db],
+    [0x123c4a, 0x4f9992, 0x266d74, 0xa9e4cf],
+    [0x162431, 0x536d7d, 0x2d465b, 0xb4d3e5],
+];
 pub fn init() {
     unsafe {
         FONT = miniz_oxide::inflate::decompress_to_vec_zlib(include_bytes!("../assets/ui-font.z"))
@@ -425,24 +432,62 @@ impl Screen {
     }
 
     pub fn wallpaper(&mut self) {
+        self.wallpaper_variant(0);
+    }
+
+    pub fn wallpaper_variant(&mut self, variant: usize) {
         unsafe {
-            if WALLPAPER.len() != self.w * self.h {
-                WALLPAPER = alloc::vec![0;self.w*self.h];
-                for y in 0..self.h {
-                    for x in 0..self.w {
-                        let fx = x as f32 / self.w as f32;
-                        let fy = y as f32 / self.h as f32;
-                        let dx = fx - 0.85;
-                        let dy = fy - 0.70;
-                        let light = (1.0 - (dx * dx * 1.8 + dy * dy * 3.4)).max(0.0);
-                        let mut c = mix(0x101521, 0x19585d, (255. * light * light) as u32);
-                        let wave = fy - (0.48 + fx * 0.40 - fx * fx * 0.74);
-                        let haze = (1.0 - wave.abs() * 6.5).max(0.0);
-                        c = mix(c, 0x53609d, (104.0 * haze * haze) as u32);
-                        if x % 28 == 0 && y % 28 == 0 {
-                            c = mix(c, 0x92b6c6, 29);
+            let key = (self.w, self.h, variant % DESK_PALETTES.len());
+            if WALLPAPER_KEY != key {
+                WALLPAPER_KEY = key;
+                WALLPAPER.resize(self.w * self.h, 0);
+                let [base, sky, core, rim] = DESK_PALETTES[key.2];
+                // Sample the smooth wallpaper on a grid so the software float
+                // operations don't stall input. Interpolate to native resolution.
+                const STEP: usize = 4;
+                let columns = self.w.div_ceil(STEP) + 1;
+                let rows = self.h.div_ceil(STEP) + 1;
+                let mut samples = alloc::vec![0; columns * rows];
+                let ratio = self.w as f32 / self.h as f32;
+                for y in 0..rows {
+                    let fy = (y * STEP) as f32 / self.h as f32;
+                    for x in 0..columns {
+                        let fx = (x * STEP) as f32 / self.w as f32;
+                        let light = (0.28 + 0.62 * (1.0 - fy) + 0.08 * fx).clamp(0.0, 1.0);
+                        let mut c = mix(base, sky, (255.0 * light) as u32);
+                        for (cx, cy, radius) in
+                            [(0.13, 0.29, 0.16), (0.91, -0.05, 0.50), (0.30, 1.02, 0.57)]
+                        {
+                            let dx = (fx - cx) * ratio / radius;
+                            let dy = (fy - cy) / radius;
+                            let distance = dx * dx + dy * dy;
+                            let soft_edge = ((1.01 - distance) * 105.0).clamp(0.0, 1.0);
+                            if soft_edge > 0.0 {
+                                let gloss = (distance * distance * (0.66 - dy * 0.26 - dx * 0.20))
+                                    .clamp(0.0, 1.0);
+                                let body = mix(
+                                    core,
+                                    sky,
+                                    ((0.34 + dx * 0.30 + dy * 0.16).clamp(0.04, 0.86) * 255.0)
+                                        as u32,
+                                );
+                                let surface = mix(body, rim, (255.0 * gloss) as u32);
+                                c = mix(c, surface, (248.0 * soft_edge) as u32);
+                            }
                         }
-                        WALLPAPER[y * self.w + x] = c;
+                        samples[y * columns + x] = c;
+                    }
+                }
+                for (y, row) in WALLPAPER.chunks_exact_mut(self.w).enumerate() {
+                    let top = (y / STEP) * columns;
+                    let bottom = top + columns;
+                    let weight_y = (y % STEP * 255 / STEP) as u32;
+                    for (x, pixel) in row.iter_mut().enumerate() {
+                        let col = x / STEP;
+                        let weight_x = (x % STEP * 255 / STEP) as u32;
+                        let above = mix(samples[top + col], samples[top + col + 1], weight_x);
+                        let below = mix(samples[bottom + col], samples[bottom + col + 1], weight_x);
+                        *pixel = mix(above, below, weight_y);
                     }
                 }
             }

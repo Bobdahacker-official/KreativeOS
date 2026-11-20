@@ -9,8 +9,8 @@ use crate::{
 use core::fmt::Write;
 pub(crate) const INK: u32 = 0x20363a;
 pub(crate) const MUTED: u32 = 0x566a69;
-const PANEL: u32 = 0xf4f5ed;
-pub(crate) const SURFACE: u32 = 0xe5ebe0;
+const PANEL: u32 = 0xf0f5fa;
+pub(crate) const SURFACE: u32 = 0xe2ecf6;
 const NAMES: [&str; 15] = [
     "Files",
     "Notes",
@@ -34,27 +34,132 @@ const ORGANIZER: usize = 13;
 const HARDWARE_CENTER: usize = 14;
 const APP_COUNT: usize = NAMES.len();
 const BAR: i32 = 54;
-const LAUNCHER_WIDTH: i32 = 530;
-const LAUNCHER_HEIGHT: i32 = 340;
-const LAUNCHER_CARD: i32 = 168;
-const LAUNCHER_ROW: i32 = 47;
-const APP_GROUPS: [&str; APP_COUNT] = [
-    "Storage",
-    "Writing",
-    "Development",
-    "Web",
-    "Utilities",
-    "Creative",
-    "Games",
-    "Software",
-    "Connectivity",
-    "Preferences",
-    "Games",
-    "Documentation",
-    "Creative",
-    "Productivity",
-    "Diagnostics",
+const APP_COLORS: [u32; APP_COUNT] = [
+    0xeab353, 0x7ac7b0, 0x6687b9, 0x69b8f1, 0x9e91ee, 0xe8829e, 0x89c376, 0xd19d77, 0x6bd1ca,
+    0x9aaed4, 0xe0a373, 0xa2c58b, 0x75b9f2, 0xb89de9, 0x69bdc2,
 ];
+const PRESETS: [(&str, u8, u32, u8); 4] = [
+    ("Glacier", 0, 0x185c9a, 0),
+    ("Dusk", 1, 0x5353a0, 1),
+    ("Lagoon", 0, 0x176e62, 2),
+    ("Contrast", 2, 0x254256, 3),
+];
+
+#[derive(Clone, Copy)]
+struct Box2 {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+impl Box2 {
+    fn at(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Self { x, y, w, h }
+    }
+    fn has(self, x: i32, y: i32) -> bool {
+        (self.x..self.x + self.w).contains(&x) && (self.y..self.y + self.h).contains(&y)
+    }
+    fn glass(self, s: &mut Screen, radius: i32, fill: u32, alpha: u32) {
+        s.rounded(self.x, self.y, self.w, self.h, radius, fill, alpha);
+    }
+}
+struct Dock {
+    body: Box2,
+    start: Box2,
+    status: Box2,
+    step: i32,
+}
+impl Dock {
+    fn new(w: i32, h: i32) -> Self {
+        let width = (w - 24).min(848);
+        let x = (w - width) / 2;
+        let y = h - BAR;
+        Self {
+            body: Box2::at(x, y, width, 46),
+            start: Box2::at(x + 6, y + 5, 73, 36),
+            status: Box2::at(x + width - 106, y + 5, 100, 36),
+            step: (width - 192) / APP_COUNT as i32,
+        }
+    }
+    fn slot(&self, index: usize) -> Box2 {
+        Box2::at(
+            self.body.x + 84 + index as i32 * self.step,
+            self.body.y + 5,
+            self.step,
+            36,
+        )
+    }
+}
+struct AppGrid {
+    body: Box2,
+    search: Box2,
+    step: i32,
+}
+impl AppGrid {
+    fn new(w: i32, h: i32) -> Self {
+        let width = (w - 40).min(688);
+        let x = (w - width) / 2;
+        let y = (h - BAR - 342) / 2;
+        Self {
+            body: Box2::at(x, y, width, 342),
+            search: Box2::at(x + width - 211, y + 22, 187, 35),
+            step: (width - 36) / 5,
+        }
+    }
+    fn item(&self, index: usize) -> Box2 {
+        Box2::at(
+            self.body.x + 18 + (index % 5) as i32 * self.step,
+            self.body.y + 76 + (index / 5) as i32 * 82,
+            self.step - 7,
+            73,
+        )
+    }
+}
+struct SettingsLayout {
+    wide: bool,
+    x: i32,
+    y: i32,
+    width: i32,
+}
+impl SettingsLayout {
+    fn new(w: i32) -> Self {
+        let wide = w >= 565;
+        let x = if wide { 174 } else { 18 };
+        Self {
+            wide,
+            x,
+            y: if wide { 60 } else { 100 },
+            width: w - x - 18,
+        }
+    }
+    fn nav(&self, index: usize) -> Box2 {
+        if self.wide {
+            Box2::at(15, 94 + index as i32 * 42, 139, 36)
+        } else {
+            let step = self.width / 3;
+            Box2::at(18 + index as i32 * step, 49, step - 4, 34)
+        }
+    }
+    fn preset(&self, index: usize) -> Box2 {
+        let step = self.width / 4;
+        Box2::at(self.x + index as i32 * step, self.y + 65, step - 8, 74)
+    }
+    fn mode(&self, index: usize) -> Box2 {
+        let step = (self.width / 3).min(118);
+        Box2::at(self.x + index as i32 * step, self.y + 182, step - 6, 34)
+    }
+    fn swatch(&self, index: usize) -> Box2 {
+        Box2::at(self.x + index as i32 * 36, self.y + 251, 27, 27)
+    }
+    fn action(&self, index: usize) -> Box2 {
+        Box2::at(
+            self.x,
+            self.y + if index == 0 { 155 } else { 199 },
+            self.width.min(240),
+            34,
+        )
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WebJob {
     Page,
@@ -170,10 +275,15 @@ struct Desktop {
     order: [usize; APP_COUNT],
     focus: usize,
     menu: bool,
+    launch_index: usize,
     search: Option<Text<64>>,
     search_row: usize,
     overview: bool,
     theme: u8,
+    wallpaper: u8,
+    settings_page: usize,
+    restart_armed: bool,
+    settings_notice: &'static str,
     magnifier: bool,
     workspace: usize,
     window_workspace: [usize; APP_COUNT],
@@ -246,21 +356,34 @@ struct Desktop {
 }
 impl Desktop {
     fn new(w: usize, h: usize) -> Self {
+        let mut appearance = (0, 0, false, 0);
+        if let Some(index) = storage::find("Appearance.cfg") {
+            let data = unsafe { storage::FILES[index].data };
+            let mut fields = data
+                .str()
+                .split_ascii_whitespace()
+                .filter_map(|word| word.parse::<u8>().ok());
+            appearance.0 = fields.next().unwrap_or(0).min(2);
+            appearance.1 = fields.next().unwrap_or(0).min(3);
+            appearance.2 = fields.next().unwrap_or(0) == 1;
+            appearance.3 = fields.next().unwrap_or(0).min(3);
+        }
         let mut d = Self {
             windows: [Window::new(); APP_COUNT],
             restore: [None; APP_COUNT],
             order: core::array::from_fn(|i| i),
             focus: 0,
             menu: false,
+            launch_index: 0,
             search: None,
             search_row: 0,
             overview: false,
-            magnifier: false,
-            theme: storage::find("Appearance.cfg")
-                .map(|index| unsafe { storage::FILES[index].data })
-                .and_then(|data| data.str().parse::<u8>().ok())
-                .filter(|&value| value <= 2)
-                .unwrap_or(0),
+            magnifier: appearance.2,
+            theme: appearance.0,
+            wallpaper: appearance.1,
+            settings_page: 0,
+            restart_armed: false,
+            settings_notice: "",
             workspace: 0,
             window_workspace: [0; APP_COUNT],
             clipboard: alloc::vec::Vec::new(),
@@ -268,7 +391,7 @@ impl Desktop {
             my: 380,
             buttons: 0,
             drag: None,
-            accent: 0x1d6c58,
+            accent: PRESETS[appearance.3 as usize].2,
             note: Text::new(),
             filename: Text::new(),
             draft_at: None,
@@ -368,8 +491,6 @@ impl Desktop {
             w: (w as i32 * 3 / 4).min(800),
             h: (h as i32 * 2 / 3).min(545),
         };
-        d.open(0);
-        d.open(IMAGES);
         if let Some((name, note)) = storage::load_draft() {
             let already_saved = storage::find(name.str()).is_some_and(|index| {
                 let saved = unsafe { &storage::FILES[index].data };
@@ -394,6 +515,12 @@ impl Desktop {
         d
     }
     fn open(&mut self, id: usize) {
+        if id >= APP_COUNT {
+            return;
+        }
+        if self.focus != id || !self.visible(id) {
+            self.restart_armed = false;
+        }
         if id == HARDWARE_CENTER && !self.windows[id].open {
             self.hardware_center.refresh();
         }
@@ -935,6 +1062,7 @@ impl Desktop {
         }
         if key == 0xab {
             self.magnifier = !self.magnifier;
+            self.save_appearance();
             return;
         }
         if key == 0xa2 || key == 0xaa {
@@ -991,6 +1119,34 @@ impl Desktop {
         }
         if key == 27 {
             self.menu = !self.menu;
+            self.launch_index = 0;
+            self.restart_armed = false;
+            return;
+        }
+        if self.menu {
+            let count = self.launch_ids().count();
+            match key {
+                b'\n' => {
+                    let id = self.launch_ids().nth(self.launch_index);
+                    if let Some(id) = id {
+                        self.open(id);
+                    }
+                }
+                0x80 => self.launch_index = self.launch_index.saturating_sub(5),
+                0x81 => self.launch_index = (self.launch_index + 5).min(count.saturating_sub(1)),
+                0x82 => self.launch_index = self.launch_index.saturating_sub(1),
+                0x83 | b'\t' => {
+                    self.launch_index = (self.launch_index + 1).min(count.saturating_sub(1))
+                }
+                32..=126 => {
+                    let mut query = Text::new();
+                    if key != b' ' {
+                        query.push(key);
+                    }
+                    self.open_search(query);
+                }
+                _ => {}
+            }
             return;
         }
         if key == b'\t' {
@@ -1170,6 +1326,9 @@ impl Desktop {
     }
     fn step_image(&mut self, direction: isize) {
         let count = self.images.files.len() as isize;
+        if count == 0 {
+            return;
+        }
         self.images
             .select((self.images.selected as isize + direction).rem_euclid(count) as usize);
     }
@@ -1180,6 +1339,264 @@ impl Desktop {
     fn task_ids(&self) -> impl Iterator<Item = usize> + '_ {
         let show_guide = self.installed && self.windows[GUIDE].open;
         (0..APP_COUNT).filter(move |&id| id != GUIDE || show_guide)
+    }
+    fn launch_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        (0..APP_COUNT).filter(|&id| id != GUIDE || self.installed)
+    }
+    fn open_search(&mut self, query: Text<64>) {
+        self.search = Some(query);
+        self.overview = false;
+        self.search_row = 0;
+        self.menu = false;
+        self.tray = false;
+    }
+    fn save_appearance(&mut self) {
+        let accent = PRESETS
+            .iter()
+            .position(|preset| preset.2 == self.accent)
+            .unwrap_or(0);
+        let mut value = Text::<16>::new();
+        let _ = write!(
+            value,
+            "{} {} {} {}",
+            self.theme,
+            self.wallpaper,
+            u8::from(self.magnifier),
+            accent
+        );
+        self.settings_notice = if storage::store_file("Appearance.cfg", value.str().as_bytes()) {
+            "Appearance saved"
+        } else {
+            "Applied for this session"
+        };
+    }
+    fn settings_click(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        let layout = SettingsLayout::new(w);
+        for page in 0..3 {
+            if layout.nav(page).has(x, y) {
+                self.settings_page = page;
+                self.restart_armed = false;
+                self.settings_notice = "";
+                return;
+            }
+        }
+        self.restart_armed =
+            self.restart_armed && self.settings_page == 1 && layout.action(1).has(x, y);
+        match self.settings_page {
+            0 => {
+                for (index, &(_, theme, accent, wallpaper)) in PRESETS.iter().enumerate() {
+                    if layout.preset(index).has(x, y) {
+                        self.theme = theme;
+                        self.accent = accent;
+                        self.wallpaper = wallpaper;
+                        self.save_appearance();
+                        return;
+                    }
+                }
+                for mode in 0..3 {
+                    if layout.mode(mode).has(x, y) {
+                        self.theme = mode as u8;
+                        self.save_appearance();
+                        return;
+                    }
+                }
+                for (index, &(_, _, accent, _)) in PRESETS.iter().enumerate() {
+                    if layout.swatch(index).has(x, y) {
+                        self.accent = accent;
+                        self.save_appearance();
+                        return;
+                    }
+                }
+            }
+            1 if layout.action(0).has(x, y) => {
+                self.settings_notice = if storage::sync() {
+                    "Files saved to disk"
+                } else {
+                    "No writable data disk"
+                };
+            }
+            1 if layout.action(1).has(x, y) && layout.action(1).y + 34 < h => {
+                if self.restart_armed {
+                    self.checkpoint_draft(true);
+                    hardware::reboot();
+                }
+                self.restart_armed = true;
+                self.settings_notice = "Select Restart again to confirm";
+            }
+            2 if layout.action(0).has(x, y) => {
+                self.magnifier = !self.magnifier;
+                self.save_appearance();
+            }
+            _ => {}
+        }
+    }
+    fn draw_settings(&self, s: &mut Screen, n: &Network, x: i32, y: i32, w: i32, h: i32) {
+        let layout = SettingsLayout::new(w);
+        if layout.wide {
+            s.rect(x + 1, y + 38, 158, h - 39, 0xe4edf7);
+            s.text(x + 24, y + 62, "Preferences", MUTED, 1);
+        }
+        for (index, name) in ["Appearance", "System", "Accessibility"].iter().enumerate() {
+            let nav = layout.nav(index);
+            let active = index == self.settings_page;
+            s.rounded(
+                x + nav.x,
+                y + nav.y,
+                nav.w,
+                nav.h,
+                8,
+                if active { 0xcfdef4 } else { 0xe9f0f8 },
+                255,
+            );
+            s.centered(
+                x + nav.x,
+                y + nav.y,
+                nav.w,
+                nav.h,
+                clip_label(name, nav.w - 8, 1),
+                INK,
+                1,
+            );
+        }
+        let left = x + layout.x;
+        let top = y + layout.y;
+        match self.settings_page {
+            0 => {
+                s.text(left, top, "Appearance", INK, 2);
+                s.text(left, top + 40, "Themes", MUTED, 1);
+                for (index, &(name, _, accent, wallpaper)) in PRESETS.iter().enumerate() {
+                    let r = layout.preset(index);
+                    let [base, sky, core, rim] = crate::graphics::DESK_PALETTES[wallpaper as usize];
+                    let selected = self.wallpaper == wallpaper;
+                    s.rounded(
+                        x + r.x,
+                        y + r.y,
+                        r.w,
+                        r.h,
+                        9,
+                        if selected { self.accent } else { 0xe0ebf5 },
+                        255,
+                    );
+                    s.rounded(x + r.x + 2, y + r.y + 2, r.w - 4, r.h - 4, 7, 0xf3f7fa, 255);
+                    s.rounded(x + r.x + 6, y + r.y + 6, r.w - 12, 37, 5, sky, 255);
+                    let size = (r.w - 18).min(35);
+                    s.rounded(x + r.x + 9, y + r.y + 13, size, 24, 12, core, 255);
+                    s.rounded(x + r.x + r.w - 22, y + r.y + 10, 14, 15, 7, rim, 255);
+                    s.rect(
+                        x + r.x + 8,
+                        y + r.y + 44,
+                        r.w - 16,
+                        3,
+                        if selected { accent } else { base },
+                    );
+                    s.text(
+                        x + r.x + 7,
+                        y + r.y + 52,
+                        clip_label(name, r.w - 12, 1),
+                        INK,
+                        1,
+                    );
+                }
+                s.text(left, top + 154, "Color mode", MUTED, 1);
+                for (index, name) in ["Light", "Dark", "Contrast"].iter().enumerate() {
+                    let r = layout.mode(index);
+                    button(
+                        s,
+                        x + r.x,
+                        y + r.y,
+                        r.w,
+                        clip_label(name, r.w - 6, 1),
+                        if self.theme == index as u8 {
+                            self.accent
+                        } else {
+                            SURFACE
+                        },
+                    );
+                }
+                s.text(left, top + 224, "Accent color", MUTED, 1);
+                for (index, &(_, _, color, _)) in PRESETS.iter().enumerate() {
+                    let r = layout.swatch(index);
+                    s.rounded(
+                        x + r.x,
+                        y + r.y,
+                        r.w,
+                        r.h,
+                        11,
+                        if self.accent == color { INK } else { SURFACE },
+                        255,
+                    );
+                    s.rounded(x + r.x + 3, y + r.y + 3, r.w - 6, r.h - 6, 9, color, 255);
+                }
+            }
+            1 => {
+                s.text(left, top, "System", INK, 2);
+                let (used, capacity) = crate::memory::usage();
+                let mut metrics = Text::<250>::new();
+                let _ = write!(
+                    metrics,
+                    "Display   {} x {}\nStorage   {} / {}\nNetwork   {}\nKernel heap   {} / {} MiB",
+                    s.w,
+                    s.h,
+                    storage::filesystem(),
+                    storage::backend(),
+                    n.adapter_name(),
+                    used / 1048576,
+                    capacity / 1048576
+                );
+                s.wrapped(left, top + 43, layout.width, 104, metrics.str(), INK);
+                for (index, name) in [
+                    "Save files",
+                    if self.restart_armed {
+                        "Confirm restart"
+                    } else {
+                        "Restart KreativeOS"
+                    },
+                ]
+                .iter()
+                .enumerate()
+                {
+                    let r = layout.action(index);
+                    if r.y + r.h < h {
+                        button(
+                            s,
+                            x + r.x,
+                            y + r.y,
+                            r.w,
+                            name,
+                            if self.restart_armed && index == 1 {
+                                0xa6414b
+                            } else {
+                                SURFACE
+                            },
+                        );
+                    }
+                }
+            }
+            _ => {
+                s.text(left, top, "Accessibility", INK, 2);
+                s.wrapped(left, top + 45, layout.width, 85, "Magnify the area around the pointer. Press Ctrl+M to toggle while using other apps.", MUTED);
+                let r = layout.action(0);
+                button(
+                    s,
+                    x + r.x,
+                    y + r.y,
+                    r.w,
+                    if self.magnifier {
+                        "Turn magnifier off"
+                    } else {
+                        "Turn magnifier on"
+                    },
+                    if self.magnifier { self.accent } else { SURFACE },
+                );
+            }
+        }
+        s.text(
+            left,
+            y + h - 30,
+            clip_label(self.settings_notice, layout.width, 1),
+            self.accent,
+            1,
+        );
     }
     fn calculate(&mut self) {
         self.answer.clear();
@@ -1274,10 +1691,23 @@ impl Desktop {
     }
     fn pointer_hover(&self, w: i32, h: i32) -> Option<(usize, i32)> {
         if self.menu {
-            return Some((APP_COUNT, self.my / 48));
+            let grid = AppGrid::new(w, h);
+            return (0..self.launch_ids().count())
+                .find(|&index| grid.item(index).has(self.mx, self.my))
+                .map(|index| (APP_COUNT, index as i32));
         }
-        if self.my >= h - BAR {
-            return Some((APP_COUNT + 1, (self.mx - 124) / task_width(w)));
+        let dock = Dock::new(w, h);
+        if dock.body.has(self.mx, self.my) {
+            let index = if dock.start.has(self.mx, self.my) {
+                -1
+            } else if dock.status.has(self.mx, self.my) {
+                -2
+            } else {
+                (0..self.task_ids().count())
+                    .find(|&n| dock.slot(n).has(self.mx, self.my))
+                    .map_or(-3, |n| n as i32)
+            };
+            return Some((APP_COUNT + 1, index));
         }
         for &id in self.order.iter().rev() {
             let win = self.windows[id];
@@ -1363,25 +1793,25 @@ impl Desktop {
                 }
                 return;
             }
-            if y >= s.h as i32 - BAR {
-                if x >= s.w as i32 - 89 {
+            let dock = Dock::new(s.w as i32, s.h as i32);
+            if dock.body.has(x, y) {
+                let app = self
+                    .task_ids()
+                    .enumerate()
+                    .find_map(|(slot, id)| dock.slot(slot).has(x, y).then_some(id));
+                self.restart_armed = false;
+                if dock.status.has(x, y) {
                     self.tray = !self.tray;
                     self.menu = false;
-                } else if x < 118 {
+                } else if dock.start.has(x, y) {
                     self.tray = false;
                     self.menu = !self.menu;
-                } else {
-                    let step = task_width(s.w as i32);
-                    let slot = ((x - 124).max(0) / step) as usize;
-                    if x >= 124 {
-                        let id = self.task_ids().nth(slot);
-                        if let Some(id) = id {
-                            if self.focus == id && self.windows[id].open && !self.windows[id].min {
-                                self.windows[id].min = true;
-                            } else {
-                                self.open(id);
-                            }
-                        }
+                    self.launch_index = 0;
+                } else if let Some(id) = app {
+                    if self.focus == id && self.visible(id) {
+                        self.windows[id].min = true;
+                    } else {
+                        self.open(id);
                     }
                 }
                 return;
@@ -1425,24 +1855,18 @@ impl Desktop {
                 return;
             }
             if self.menu {
-                let top = s.h as i32 - BAR - LAUNCHER_HEIGHT;
-                if (28..LAUNCHER_WIDTH - 2).contains(&x)
-                    && (top + 77..top + 77 + 5 * LAUNCHER_ROW).contains(&y)
-                {
-                    let row = ((y - top - 77) / LAUNCHER_ROW) as usize;
-                    let column = ((x - 28) / LAUNCHER_CARD) as usize;
-                    let id = row * 3 + column;
-                    if id < APP_COUNT && (id != GUIDE || self.installed) {
-                        self.open(id);
-                        return;
-                    }
+                let grid = AppGrid::new(s.w as i32, s.h as i32);
+                let target = self
+                    .launch_ids()
+                    .enumerate()
+                    .find_map(|(position, id)| grid.item(position).has(x, y).then_some(id));
+                if let Some(id) = target {
+                    self.open(id);
+                } else if grid.search.has(x, y) {
+                    self.open_search(Text::new());
+                } else if !grid.body.has(x, y) {
+                    self.menu = false;
                 }
-                if (366..520).contains(&x) && (top + 19..top + 53).contains(&y) {
-                    self.search = Some(Text::new());
-                    self.overview = false;
-                    self.search_row = 0;
-                }
-                self.menu = false;
                 return;
             }
             let width = s.w as i32;
@@ -1467,11 +1891,13 @@ impl Desktop {
                 let ly = y - w.y;
                 if ly < 38 {
                     if lx >= w.w - 38 {
+                        self.restart_armed = false;
                         self.windows[id].open = false;
                         if id == 3 {
                             crate::audio::stop();
                         }
                     } else if (w.w - 114..w.w - 76).contains(&lx) {
+                        self.restart_armed = false;
                         self.windows[id].min = true
                     } else if (w.w - 76..w.w - 38).contains(&lx) {
                         if let Some(old) = self.restore[id].take() {
@@ -1668,34 +2094,7 @@ impl Desktop {
                     }
                 }
             }
-            9 => {
-                if y >= 110 && y < 170 {
-                    self.accent = if x < 200 {
-                        0x1d6c58
-                    } else if x < 400 {
-                        0x5655a0
-                    } else {
-                        0xa75a35
-                    }
-                } else if (178..213).contains(&y) && (24..404).contains(&x) {
-                    self.theme = ((x - 24) / 128) as u8;
-                    let value = [b'0' + self.theme];
-                    if storage::put("Appearance.cfg", &value).is_ok() {
-                        storage::sync();
-                    }
-                } else if y >= 220 && y < 270 {
-                    self.notice.set(if storage::sync() {
-                        "All files saved"
-                    } else {
-                        "No writable data disk"
-                    })
-                } else if y >= 300 && y < 350 {
-                    self.checkpoint_draft(true);
-                    hardware::reboot()
-                } else if (372..406).contains(&y) && (24..304).contains(&x) {
-                    self.magnifier = !self.magnifier;
-                }
-            }
+            9 => self.settings_click(x, y, self.windows[id].w, self.windows[id].h),
             10 => {
                 if y < 90 {
                     self.ttt = [0; 9];
@@ -1750,21 +2149,12 @@ impl Desktop {
         }
         let w = s.w as i32;
         let h = s.h as i32;
-        if self.workspace == 0 {
-            s.wallpaper();
-        } else {
-            s.rect(
-                0,
-                0,
-                w,
-                h,
-                [0, 0x253c52, 0x3b2d49, 0x3a4130][self.workspace],
-            );
-        }
+        s.wallpaper_variant((self.wallpaper as usize + self.workspace) % 4);
         s.theme = self.theme;
-        s.rounded(14, 8, 130, 32, 8, 0x1c2c3c, 255);
-        s.symbol(24, 14, 15, 0x87e3d1);
-        s.text(51, 15, "KreativeOS", 0xf1f7fa, 1);
+        Box2::at(18, 10, 144, 32).glass(s, 13, 0xe8f1fa, 225);
+        s.symbol(29, 16, 15, self.accent);
+        s.text(55, 17, "KreativeOS", INK, 1);
+        Box2::at(w - 198, 6, 184, 36).glass(s, 13, 0xe8f1fa, 220);
         for (i, label) in ["1", "2", "3", "4"].iter().enumerate() {
             let xx = w - 194 + i as i32 * 44;
             let selected = i == self.workspace;
@@ -1773,8 +2163,8 @@ impl Desktop {
                 10,
                 40,
                 28,
-                7,
-                if selected { 0x80bdab } else { 0x203538 },
+                8,
+                if selected { self.accent } else { 0xdce8f5 },
                 255,
             );
             s.centered(
@@ -1783,7 +2173,7 @@ impl Desktop {
                 40,
                 28,
                 label,
-                if selected { INK } else { 0xecf7f2 },
+                if selected { 0xffffff } else { INK },
                 1,
             );
         }
@@ -1794,72 +2184,68 @@ impl Desktop {
             }
         }
 
-        let bar_y = h - BAR;
-        s.rect(0, bar_y, w, BAR, 0x111b2a);
-        s.rect(0, bar_y, w, 2, 0x5d8396);
-        s.rounded(
-            12,
-            bar_y + 8,
-            106,
-            38,
-            9,
-            if self.menu { 0x417278 } else { 0x26394e },
-            255,
-        );
-        s.symbol(22, bar_y + 16, 15, 0xe4f5ea);
-        s.centered(41, bar_y + 8, 68, 38, "Apps", 0xe4f5ea, 1);
-        let step = task_width(w);
+        let dock = Dock::new(w, h);
+        let bar_y = dock.body.y;
+        s.shadow(dock.body.x, bar_y, dock.body.w, dock.body.h);
+        dock.body.glass(s, 15, 0xf1f7fe, 240);
+        dock.start
+            .glass(s, 11, if self.menu { 0xc9e0f4 } else { 0xdceaf7 }, 255);
+        s.symbol(dock.start.x + 7, dock.start.y + 8, 15, self.accent);
+        s.text(dock.start.x + 30, dock.start.y + 9, "Apps", INK, 1);
         for (slot, id) in self.task_ids().enumerate() {
-            let left = 124 + slot as i32 * step;
+            let r = dock.slot(slot);
             let selected = self.focus == id && self.visible(id);
-            let hover = (left..left + step).contains(&self.mx) && self.my >= bar_y;
-            s.rounded(
-                left + 3,
-                bar_y + 7,
-                step - 6,
-                40,
-                7,
-                if selected {
-                    0x31596a
-                } else if hover {
-                    0x304960
-                } else {
-                    0x1d2d42
-                },
-                255,
-            );
+            let hover = r.has(self.mx, self.my);
+            let xx = r.x + (r.w - 26) / 2;
+            let style = if selected || hover {
+                0xbfd7ef
+            } else {
+                0xe2edf8
+            };
+            Box2::at(xx, r.y + 3, 26, 26).glass(s, 8, style, 255);
             s.symbol(
-                left + (step - 20) / 2,
-                bar_y + 16,
+                xx + 3,
+                r.y + 6,
                 id,
-                if selected { 0xaaf3d3 } else { 0xe8f4fa },
+                if selected { self.accent } else { 0x23435f },
             );
             if self.windows[id].open {
-                s.rect(
-                    left + (step - 12) / 2,
-                    bar_y + 45,
-                    12,
+                s.rounded(
+                    r.x + r.w / 2 - 4,
+                    r.y + 32,
+                    8,
                     2,
-                    if selected { 0x99e3ba } else { 0x72978d },
+                    1,
+                    if selected { self.accent } else { 0x718da9 },
+                    255,
                 );
             }
-            if hover && !self.menu {
-                let width = crate::graphics::text_width(NAMES[id], 1) + 22;
-                let x = (left + (step - width) / 2).clamp(4, w - width - 4);
-                s.rounded(x, bar_y - 35, width, 28, 5, 0xf4f5ed, 255);
-                s.centered(x, bar_y - 35, width, 28, NAMES[id], INK, 1);
+            if hover && !self.menu && !self.tray {
+                let width = (crate::graphics::text_width(NAMES[id], 1) + 24).min(w - 8);
+                let x = (r.x + (r.w - width) / 2).clamp(4, w - width - 4);
+                s.rounded(x, bar_y - 34, width, 27, 7, 0xf3f8ff, 255);
+                s.centered(x, bar_y - 34, width, 27, NAMES[id], INK, 1);
             }
         }
         let (hh, mm, _) = hardware::clock();
         let mut clock: Text<12> = Text::new();
         let _ = write!(clock, "{:02}:{:02}", hh, mm);
-        s.rect(w - 89, bar_y + 11, 1, 32, 0x40546a);
-        s.centered(w - 87, bar_y + 6, 80, 23, clock.str(), 0xe3f4ea, 2);
+        dock.status
+            .glass(s, 10, if self.tray { 0xc9e0f4 } else { 0xdceaf7 }, 255);
         s.centered(
-            w - 87,
-            bar_y + 30,
-            80,
-            16,
+            dock.status.x,
+            dock.status.y - 1,
+            dock.status.w,
+            22,
+            clock.str(),
+            INK,
+            1,
+        );
+        s.centered(
+            dock.status.x,
+            dock.status.y + 17,
+            dock.status.w,
+            17,
             if n.wifi.joined {
                 "Wi-Fi"
             } else if n.link_speed().is_some() && n.config.ip != [0; 4] {
@@ -1869,7 +2255,7 @@ impl Desktop {
             } else {
                 "Offline"
             },
-            0x9ab9ad,
+            MUTED,
             1,
         );
         if self.tray {
@@ -1900,47 +2286,37 @@ impl Desktop {
         }
 
         if self.menu {
-            let top = bar_y - LAUNCHER_HEIGHT;
-            s.shadow(12, top, LAUNCHER_WIDTH, LAUNCHER_HEIGHT - 8);
-            s.rounded(
-                12,
-                top,
-                LAUNCHER_WIDTH,
-                LAUNCHER_HEIGHT - 8,
-                14,
-                0x17263a,
-                255,
-            );
-            s.text(28, top + 18, "Applications", 0xf2f8fb, 2);
-            s.text(
-                29,
-                top + 47,
-                "Open an app in the current workspace",
-                0xa8c4d3,
+            let grid = AppGrid::new(w, h);
+            let b = grid.body;
+            s.shadow(b.x, b.y, b.w, b.h);
+            b.glass(s, 20, 0xf2f7fe, 243);
+            s.text(b.x + 24, b.y + 21, "Applications", INK, 2);
+            grid.search.glass(s, 11, 0xe0edf9, 255);
+            s.centered(
+                grid.search.x,
+                grid.search.y,
+                grid.search.w,
+                grid.search.h,
+                "Search workspace",
+                INK,
                 1,
             );
-            s.rounded(366, top + 19, 154, 34, 6, 0x304961, 255);
-            s.centered(366, top + 19, 154, 34, "Search workspace", 0xeaf7fa, 1);
-            for (id, label) in NAMES.iter().enumerate() {
-                if id == GUIDE && !self.installed {
-                    continue;
-                }
-                let left = 28 + (id % 3) as i32 * LAUNCHER_CARD;
-                let row = top + 77 + (id / 3) as i32 * LAUNCHER_ROW;
-                let over = (left..left + LAUNCHER_CARD - 8).contains(&self.mx)
-                    && (row..row + 42).contains(&self.my);
-                s.rounded(
-                    left,
-                    row,
-                    LAUNCHER_CARD - 8,
-                    42,
-                    8,
-                    if over { 0x36546a } else { 0x243950 },
-                    255,
+            for (index, id) in self.launch_ids().enumerate() {
+                let item = grid.item(index);
+                let active = index == self.launch_index || item.has(self.mx, self.my);
+                item.glass(s, 12, if active { 0xcbdef4 } else { 0xe7eff9 }, 255);
+                let icon = Box2::at(item.x + (item.w - 37) / 2, item.y + 8, 37, 34);
+                icon.glass(s, 10, APP_COLORS[id], 255);
+                s.symbol(icon.x + 8, icon.y + 7, id, 0x192f47);
+                s.centered(
+                    item.x,
+                    item.y + 44,
+                    item.w,
+                    24,
+                    clip_label(NAMES[id], item.w - 5, 1),
+                    INK,
+                    1,
                 );
-                s.symbol(left + 9, row + 11, id, 0x8cddc7);
-                s.text(left + 36, row + 3, clip_label(label, 117, 1), 0xebf5fa, 1);
-                s.text(left + 36, row + 22, APP_GROUPS[id], 0xa7c6d7, 1);
             }
         }
         s.theme = 0;
@@ -2027,31 +2403,51 @@ impl Desktop {
                 }
             }
             _ => {
-                let mut activity = Text::<512>::new();
                 let (used, capacity) = crate::memory::usage();
-                let _ = writeln!(
-                    activity,
-                    "Uptime: {} s   Display: {} x {}\nNetwork: {} / {} bytes per second\nHeap: {} / {} KiB",
+                let files = storage::used_slots();
+                let mut value = Text::<100>::new();
+                for (row, (label, taken, total)) in [
+                    ("Kernel memory", used, capacity),
+                    ("Local file slots", files, storage::COUNT),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let top = y + 47 + row as i32 * 60;
+                    s.rounded(x + 14, top, 366, 54, 9, SURFACE, 255);
+                    s.text(x + 25, top + 5, label, INK, 1);
+                    value.clear();
+                    if row == 0 {
+                        let _ = write!(value, "{} / {} MiB", taken / 1048576, total / 1048576);
+                    } else {
+                        let _ = write!(value, "{taken} / {total}");
+                    }
+                    s.centered(x + 260, top + 3, 105, 22, value.str(), MUTED, 1);
+                    s.rounded(x + 25, top + 33, 342, 8, 4, 0xcddcec, 255);
+                    let width = (taken.saturating_mul(342) / total.max(1)).min(342) as i32;
+                    if width > 0 {
+                        s.rounded(x + 25, top + 33, width, 8, 4, self.accent, 255);
+                    }
+                }
+                value.clear();
+                let _ = write!(
+                    value,
+                    "Download {} B/s     Upload {} B/s",
+                    self.byte_rates.0, self.byte_rates.1
+                );
+                s.text(x + 25, y + 177, clip_label(value.str(), 345, 1), INK, 1);
+                value.clear();
+                let _ = write!(
+                    value,
+                    "Uptime {} s     Display {} x {}",
                     hardware::millis() / 1000,
                     s.w,
-                    s.h,
-                    self.byte_rates.0,
-                    self.byte_rates.1,
-                    used / 1024,
-                    capacity / 1024
+                    s.h
                 );
-                let _ = writeln!(
-                    activity,
-                    "Storage: {} / {} local files\n{}\n{}",
-                    unsafe { storage::FILES.iter().filter(|file| file.used).count() },
-                    storage::COUNT,
-                    n.status,
-                    self.notice.str()
-                );
-                for event in self.alerts.iter().take(4) {
-                    let _ = writeln!(activity, "{}", event);
+                s.text(x + 25, y + 202, clip_label(value.str(), 345, 1), MUTED, 1);
+                if let Some(event) = self.alerts.last() {
+                    s.text(x + 25, y + 233, clip_label(event, 345, 1), MUTED, 1);
                 }
-                s.wrapped(x + 16, y + 52, 360, 220, activity.str(), INK);
             }
         }
     }
@@ -2068,7 +2464,7 @@ impl Desktop {
             w,
             h,
             10,
-            if active { 0x5e8998 } else { 0x4e606c },
+            if active { 0xa6c5df } else { 0x8fa6bb },
             255,
         );
         s.rounded(x + 1, y + 1, w - 2, h - 2, 9, PANEL, 255);
@@ -2078,7 +2474,7 @@ impl Desktop {
             w - 2,
             37,
             8,
-            if active { 0x203349 } else { 0x37465a },
+            if active { 0xe3edf9 } else { 0xdde6ee },
             255,
         );
         s.rect(
@@ -2086,10 +2482,10 @@ impl Desktop {
             y + 35,
             w - 2,
             3,
-            if active { 0x6bc7b3 } else { 0x6a7c8b },
+            if active { 0xbdd2e8 } else { 0xc5d2df },
         );
-        s.symbol(x + 11, y + 8, id, 0xb3d9c6);
-        s.text(x + 42, y + 9, NAMES[id], 0xf2f7f1, 1);
+        s.symbol(x + 11, y + 8, id, self.accent);
+        s.text(x + 42, y + 9, NAMES[id], INK, 1);
         for (i, label) in ["_", "+", "x"].iter().enumerate() {
             let left = x + w - 114 + i as i32 * 38;
             let over = (left..left + 38).contains(&self.mx) && (y..y + 36).contains(&self.my);
@@ -2100,21 +2496,21 @@ impl Desktop {
                     32,
                     27,
                     4,
-                    if i == 2 { 0x824d42 } else { 0x52726d },
+                    if i == 2 { 0xf3ccd2 } else { 0xcadcf0 },
                     255,
                 );
             }
             match *label {
-                "_" => s.rect(left + 14, y + 21, 10, 2, 0xe5eee7),
+                "_" => s.rect(left + 14, y + 21, 10, 2, INK),
                 "+" => {
-                    s.rect(left + 14, y + 13, 10, 2, 0xe5eee7);
-                    s.rect(left + 14, y + 22, 10, 2, 0xe5eee7);
-                    s.rect(left + 14, y + 13, 2, 11, 0xe5eee7);
-                    s.rect(left + 22, y + 13, 2, 11, 0xe5eee7);
+                    s.rect(left + 14, y + 13, 10, 2, INK);
+                    s.rect(left + 14, y + 22, 10, 2, INK);
+                    s.rect(left + 14, y + 13, 2, 11, INK);
+                    s.rect(left + 22, y + 13, 2, 11, INK);
                 }
                 _ => {
-                    s.stroke(left, y, (15, 14), (23, 22), 0xe5eee7);
-                    s.stroke(left, y, (23, 14), (15, 22), 0xe5eee7);
+                    s.stroke(left, y, (15, 14), (23, 22), INK);
+                    s.stroke(left, y, (23, 14), (15, 22), INK);
                 }
             }
         }
@@ -2590,41 +2986,7 @@ impl Desktop {
                     1,
                 );
             }
-            9 => {
-                s.text(x + 24, y + 64, "Make it yours", self.accent, 2);
-                button(s, x + 24, y + 120, 150, "Jade", 0x1d6c58);
-                button(s, x + 220, y + 120, 150, "Iris", 0x5655a0);
-                button(s, x + 420, y + 120, 150, "Copper", 0xa75a35);
-                for (index, label) in ["Light", "Dark", "Contrast"].iter().enumerate() {
-                    button(
-                        s,
-                        x + 24 + index as i32 * 128,
-                        y + 178,
-                        120,
-                        label,
-                        if self.theme == index as u8 {
-                            self.accent
-                        } else {
-                            SURFACE
-                        },
-                    );
-                }
-                button(s, x + 24, y + 228, 280, "SAVE ALL FILES", SURFACE);
-                button(s, x + 24, y + 308, 280, "RESTART COMPUTER", SURFACE);
-                button(
-                    s,
-                    x + 24,
-                    y + 372,
-                    280,
-                    if self.magnifier {
-                        "Turn off magnifier"
-                    } else {
-                        "Magnify 2x (Ctrl+M)"
-                    },
-                    SURFACE,
-                );
-                s.text(x + 24, y + h - 40, self.notice.str(), self.accent, 1);
-            }
+            9 => self.draw_settings(s, n, x, y, w, h),
             10 => {
                 button(s, x + 20, y + 50, 160, "NEW GAME", SURFACE);
                 s.text(
@@ -2717,9 +3079,6 @@ impl Desktop {
         }
         s.clip = clip;
     }
-}
-fn task_width(width: i32) -> i32 {
-    ((width - 216) / APP_COUNT as i32).clamp(28, 58)
 }
 
 fn ethernet_details(out: &mut impl Write, n: &Network) {

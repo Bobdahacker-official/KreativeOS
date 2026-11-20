@@ -68,9 +68,10 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 - Local KAPP1 document packages, installation persistence and a launcher entry.
 - Separate Ethernet and ESP-AT Wi-Fi panels. Ethernet shows link speed, the active IPv4 configuration and remaining DHCP lease time, and saves automatic or manual profiles with a VLAN setting.
 - Hardware Center shows the processor, active storage and Ethernet drivers, the mounted filesystem, and a searchable PCI inventory. Use **Save report** to export the inventory to `Hardware.txt`.
-- Settings with three accent colors, save-all and restart.
+- Settings with four wallpaper presets, color modes, saved accent and magnifier preferences, live system details, and restart confirmation.
+- The floating dock opens the app grid and the activity panel, which shows live memory use, file usage, network traffic and uptime.
 
-F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
+F1–F10 open Files through Settings. Escape toggles the launcher. Use the arrow keys and Enter to open an app from the grid. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter. Use Up/Down to scroll. Snake uses arrow keys and Space to restart.
 
 ## Networking and hardware
 

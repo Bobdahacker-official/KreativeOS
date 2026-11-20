@@ -297,7 +297,7 @@ impl Volume {
         }
         true
     }
-    fn update(&mut self, name: &str, data: Option<&[u8]>) -> bool {
+    pub(crate) fn update(&mut self, name: &str, data: Option<&[u8]>) -> bool {
         if !self.healthy || !valid_name(name) {
             return false;
         }

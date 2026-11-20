@@ -60,9 +60,16 @@ pub unsafe extern "efiapi" fn efi_main(image: usize, system: *mut boot::SystemTa
     1
 }
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    use core::fmt::Write;
+    let mut diagnostic = text::Text::<320>::new();
+    diagnostic.append("KreativeOS: kernel panic");
+    if let Some(location) = info.location() {
+        let _ = write!(diagnostic, " at {}:{}", location.file(), location.line());
+    }
+    let _ = write!(diagnostic, ": {}\r\n", info.message());
     unsafe {
-        hardware::log(b"KreativeOS: kernel panic\r\n");
+        hardware::log(diagnostic.str().as_bytes());
     }
     loop {
         unsafe {
