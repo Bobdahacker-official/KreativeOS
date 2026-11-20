@@ -347,6 +347,27 @@ unsafe fn load_pictures(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut 
         if ((*fs).open_volume)(fs, &mut root) != 0 {
             continue;
         }
+        if crate::developer::STAGED == 0 {
+            let name = [92u16, 68, 69, 86, 69, 76, 79, 80, 46, 75, 68, 80, 0];
+            let mut file = core::ptr::null_mut();
+            if ((*root).open)(root, &mut file, name.as_ptr(), 1, 0) == 0 {
+                let buffer = &mut crate::developer::PACK;
+                let mut len = buffer.len();
+                let status = ((*file).read)(file, &mut len, buffer.as_mut_ptr());
+                let mut extra = 1;
+                let mut byte = 0;
+                let end = ((*file).read)(file, &mut extra, &mut byte);
+                ((*file).close)(file);
+                if status == 0
+                    && end == 0
+                    && extra == 0
+                    && (4..=buffer.len()).contains(&len)
+                    && &buffer[..4] == b"KDP1"
+                {
+                    crate::developer::STAGED = len;
+                }
+            }
+        }
         use crate::ax210::{FIRMWARE, FIRMWARE_LEN, MAX_FIRMWARE};
         if FIRMWARE_LEN == 0 {
             // FAT 8.3 name: AX210.UCO.
@@ -387,7 +408,10 @@ unsafe fn load_pictures(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut 
             }
         }
         ((*root).close)(root);
-        if (imported == VOLUMES.len() || offset >= IMPORT_LIMIT - 4) && FIRMWARE_LEN != 0 {
+        if (imported == VOLUMES.len() || offset >= IMPORT_LIMIT - 4)
+            && FIRMWARE_LEN != 0
+            && crate::developer::STAGED != 0
+        {
             break;
         }
     }

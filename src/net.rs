@@ -36,7 +36,14 @@ pub struct Network {
     pub vlan: u16,
     pub ethernet_status: &'static str,
     dhcp: Option<Discovery>,
-    lease_until: Option<u64>,
+    lease: Option<Lease>,
+    neighbors: [Option<(Address, [u8; 6], u64)>; 8],
+    neighbor_slot: usize,
+    dns_id: u16,
+    dns_port: u16,
+    dns_name: Text<253>,
+    dns_aliases: u8,
+    link_up: bool,
     next_hop: Address,
     io: u16,
     intel: Option<crate::e1000::Adapter>,
@@ -79,14 +86,47 @@ struct Discovery {
     attempt: u8,
     deadline: u64,
 }
+struct Lease {
+    server: Address,
+    renewal: u64,
+    rebinding: u64,
+    expires: u64,
+}
+
+fn entropy() -> u64 {
+    if core::arch::x86_64::__cpuid(1).ecx & (1 << 30) != 0 {
+        for _ in 0..8 {
+            let mut value = 0;
+            if unsafe { core::arch::x86_64::_rdrand64_step(&mut value) } == 1 {
+                return value;
+            }
+        }
+    }
+    ticks()
+}
 impl Network {
     pub unsafe fn new() -> Self {
         let mut n = Self {
-            config: Config::QEMU,
+            config: if cfg!(feature = "tls-smoke") {
+                Config::QEMU
+            } else {
+                Config::UNCONFIGURED
+            },
             vlan: 0,
-            ethernet_status: "Static IPv4",
+            ethernet_status: if cfg!(feature = "tls-smoke") {
+                "Static IPv4"
+            } else {
+                "IPv4 not configured"
+            },
             dhcp: None,
-            lease_until: None,
+            lease: None,
+            neighbors: [None; 8],
+            neighbor_slot: 0,
+            dns_id: 0,
+            dns_port: 0,
+            dns_name: Text::new(),
+            dns_aliases: 0,
+            link_up: false,
             next_hop: [0; 4],
             io: 0,
             wifi: crate::wifi::Module::new(),
@@ -153,7 +193,7 @@ impl Network {
                 if let Some(adapter) = crate::e1000::Adapter::init(bus, slot, func, model, DMA) {
                     n.mac = adapter.mac;
                     n.intel = Some(adapter);
-                    n.status = "Ethernet ready: 10.0.2.15";
+                    n.status = "Ethernet adapter ready";
                     log(b"KreativeOS: ");
                     log(model.name().as_bytes());
                     log(b" ready\r\n");
@@ -183,7 +223,7 @@ impl Network {
         for i in 0..4 {
             out32(p + 0x20 + i * 4, (DMA + 16384 + i as usize * 2048) as u32)
         }
-        n.status = "Ethernet ready: 10.0.2.15";
+        n.status = "Ethernet adapter ready";
         log(b"KreativeOS: RTL8139 ready\r\n");
         n
     }
@@ -214,19 +254,14 @@ impl Network {
         }
     }
     pub fn static_config(&mut self, config: Config, vlan: u16) -> bool {
-        let mask = u32::from_be_bytes(config.mask);
-        if self.state != 0
-            || vlan > 4094
-            || config.ip == [0; 4]
-            || config.ip[0] >= 224
-            || (mask | mask.wrapping_sub(1)) != u32::MAX
-        {
+        if !self.online() || self.state != 0 || vlan > 4094 || !config.valid() {
             return false;
         }
         self.config = config;
         self.vlan = vlan;
         self.dhcp = None;
-        self.lease_until = None;
+        self.lease = None;
+        self.neighbors.fill(None);
         self.ethernet_status = "Static IPv4";
         true
     }
@@ -235,11 +270,12 @@ impl Network {
             return false;
         }
         self.vlan = vlan;
-        self.config.ip = [0; 4];
-        self.lease_until = None;
+        self.config = Config::UNCONFIGURED;
+        self.lease = None;
+        self.neighbors.fill(None);
         self.ethernet_status = "Looking for a DHCP server";
         self.dhcp = Some(Discovery {
-            xid: ticks() as u32,
+            xid: entropy() as u32,
             offer: None,
             attempt: 0,
             deadline: millis(),
@@ -247,34 +283,86 @@ impl Network {
         true
     }
     fn dhcp_tick(&mut self) {
-        if self.lease_until.is_some_and(|end| millis() >= end) {
-            self.config.ip = [0; 4];
+        let now = millis();
+        if self
+            .lease
+            .as_ref()
+            .is_some_and(|lease| now >= lease.expires)
+        {
             if self.state != 0 {
                 self.fail("Ethernet DHCP lease expired");
             }
             self.start_dhcp(self.vlan);
         }
-        let Some(state) = &mut self.dhcp else { return };
-        if millis() < state.deadline {
+        if self.dhcp.is_none()
+            && self
+                .lease
+                .as_ref()
+                .is_some_and(|lease| now >= lease.renewal)
+        {
+            self.dhcp = Some(Discovery {
+                xid: entropy() as u32,
+                offer: None,
+                attempt: 0,
+                deadline: now,
+            });
+        }
+        let Some(state) = &self.dhcp else { return };
+        if now < state.deadline {
             return;
         }
-        if state.attempt == 4 {
-            self.dhcp = None;
-            self.ethernet_status = "DHCP timed out";
+        let (destination, phase_end) = match &self.lease {
+            Some(lease) if now < lease.rebinding => (lease.server, lease.rebinding),
+            Some(lease) => ([255; 4], lease.expires),
+            None => ([255; 4], u64::MAX),
+        };
+        let broadcast = destination == [255; 4];
+        if self.lease.is_none() && state.attempt == 4 {
+            self.ethernet_status = "DHCP: retrying discovery";
+            self.dhcp = Some(Discovery {
+                xid: entropy() as u32,
+                offer: None,
+                attempt: 0,
+                deadline: now + 10_000,
+            });
             return;
         }
-        let packet = dhcp::request(state.xid, self.mac, state.offer);
-        state.deadline = millis() + (1000 << state.attempt);
-        state.attempt += 1;
+        let mac = if broadcast {
+            [255; 6]
+        } else if let Some(hop) = self.config.route(destination) {
+            if let Some(mac) = self.neighbor(hop) {
+                mac
+            } else {
+                self.dhcp.as_mut().unwrap().deadline = (now + 500).min(phase_end);
+                self.arp(false, [0; 6], hop);
+                return;
+            }
+        } else {
+            self.dhcp.as_mut().unwrap().deadline = phase_end;
+            return;
+        };
+        let state = self.dhcp.as_mut().unwrap();
+        let client = self.config.ip;
+        let packet = dhcp::request(state.xid, self.mac, state.offer, client, broadcast);
+        state.deadline = (now + (1000 << state.attempt.min(5))).min(phase_end);
+        state.attempt = state.attempt.saturating_add(1);
+        if self.lease.is_some() {
+            self.ethernet_status = if broadcast {
+                "DHCP: rebinding lease"
+            } else {
+                "DHCP: renewing lease"
+            };
+        }
         let mut frame = [0; 342];
-        frame[..6].fill(255);
+        frame[..6].copy_from_slice(&mac);
         frame[6..12].copy_from_slice(&self.mac);
         w16(&mut frame, 12, 0x0800);
         frame[14] = 0x45;
         w16(&mut frame, 16, 328);
         frame[22] = 64;
         frame[23] = 17;
-        frame[30..34].fill(255);
+        frame[26..30].copy_from_slice(&client);
+        frame[30..34].copy_from_slice(&destination);
         let checksum = fold(sum(&frame[14..34]));
         w16(&mut frame, 24, checksum);
         w16(&mut frame, 34, 68);
@@ -285,32 +373,101 @@ impl Network {
     }
     fn dhcp_reply(&mut self, packet: &[u8]) {
         let Some(state) = &mut self.dhcp else { return };
-        let Some((kind, offer)) = dhcp::reply(packet, state.xid, self.mac) else {
+        let Some((kind, mut offer)) = dhcp::reply(packet, state.xid, self.mac) else {
             return;
         };
-        match (kind, state.offer) {
-            (2, None) if offer.server != [0; 4] && offer.config.ip != [0; 4] => {
-                state.offer = Some(offer);
-                state.attempt = 0;
-                state.deadline = millis();
-            }
-            (5, Some(previous))
-                if previous.server == offer.server
-                    && previous.config.ip == offer.config.ip
-                    && offer.seconds != 0 =>
-            {
-                self.config = offer.config;
-                self.lease_until = Some(millis().saturating_add(u64::from(offer.seconds) * 1000));
-                self.ethernet_status = "DHCP lease active";
-                self.dhcp = None;
-                unsafe { log(b"KreativeOS: Ethernet DHCP lease acquired\r\n") };
-            }
-            (6, Some(previous)) if previous.server == offer.server => {
-                self.dhcp = None;
-                self.ethernet_status = "DHCP lease rejected";
-            }
-            _ => {}
+        let now = millis();
+        if !dhcp::unicast(offer.server) {
+            return;
         }
+        if kind == 2 && state.offer.is_none() && self.lease.is_none() && offer.config.valid() {
+            state.offer = Some(offer);
+            state.attempt = 0;
+            state.deadline = now;
+            return;
+        }
+        let previous = if let Some(lease) = &self.lease {
+            if now < lease.rebinding && lease.server != offer.server {
+                return;
+            }
+            self.config
+        } else if let Some(selected) = state
+            .offer
+            .filter(|selected| selected.server == offer.server)
+        {
+            selected.config
+        } else {
+            return;
+        };
+        if kind == 6 {
+            if self.state != 0 {
+                self.fail("DHCP server revoked the IPv4 lease");
+            }
+            self.start_dhcp(self.vlan);
+            if let Some(next) = &mut self.dhcp {
+                next.deadline = now + 1000;
+            }
+        } else if kind == 5 && offer.seconds != 0 && offer.config.ip == previous.ip {
+            if offer.config.mask == [0; 4] {
+                offer.config.mask = previous.mask;
+            }
+            if !offer.has_router {
+                offer.config.router = previous.router;
+            }
+            if !offer.has_dns {
+                offer.config.dns = previous.dns;
+            }
+            if !offer.config.valid() {
+                return;
+            }
+            if self.config.mask != offer.config.mask
+                || self.config.router != offer.config.router
+                || self.config.dns != offer.config.dns
+            {
+                self.neighbors.fill(None);
+                if self.config.ip != [0; 4] && self.state != 0 {
+                    self.fail("Ethernet configuration changed during DHCP renewal");
+                }
+            }
+            self.config = offer.config;
+            let (renewal, rebinding, expires) = offer.deadlines(now);
+            self.lease = Some(Lease {
+                server: offer.server,
+                renewal,
+                rebinding,
+                expires,
+            });
+            self.ethernet_status = "DHCP lease active";
+            self.dhcp = None;
+            unsafe { log(b"KreativeOS: Ethernet DHCP lease acquired\r\n") };
+        }
+    }
+
+    pub fn lease_seconds(&self) -> Option<u64> {
+        self.lease
+            .as_ref()
+            .map(|lease| lease.expires.saturating_sub(millis()).div_ceil(1000))
+    }
+
+    fn neighbor(&self, address: Address) -> Option<[u8; 6]> {
+        let now = millis();
+        self.neighbors
+            .iter()
+            .flatten()
+            .find_map(|&(ip, mac, expires)| (ip == address && now < expires).then_some(mac))
+    }
+
+    fn remember_neighbor(&mut self, address: Address, mac: [u8; 6]) {
+        let index = self
+            .neighbors
+            .iter()
+            .position(|entry| entry.is_some_and(|(ip, _, _)| ip == address))
+            .unwrap_or_else(|| {
+                let index = self.neighbor_slot;
+                self.neighbor_slot = (index + 1) % self.neighbors.len();
+                index
+            });
+        self.neighbors[index] = Some((address, mac, millis() + 60_000));
     }
     fn transmit(&mut self, frame: &[u8]) {
         let mut tagged = [0; 1536];
@@ -398,13 +555,16 @@ impl Network {
     }
     fn dns(&mut self) {
         let mut p = [0u8; 512];
-        w16(&mut p, 0, 53000);
+        let random = entropy();
+        self.dns_id = random as u16;
+        self.dns_port = 49152 + (((random >> 16) as u16) % 16384);
+        w16(&mut p, 0, self.dns_port);
         w16(&mut p, 2, 53);
-        w16(&mut p, 8, self.port);
+        w16(&mut p, 8, self.dns_id);
         w16(&mut p, 10, 0x0100);
         w16(&mut p, 12, 1);
         let mut len = 20;
-        for label in self.host.str().split('.') {
+        for label in self.dns_name.str().split('.') {
             if label.is_empty() || label.len() > 63 {
                 self.fail("Invalid DNS name");
                 return;
@@ -420,6 +580,9 @@ impl Network {
         w16(&mut p, len + 2, 1);
         len += 4;
         w16(&mut p, 4, len as u16);
+        let checksum =
+            fold(sum(&self.config.ip) + sum(&self.config.dns) + 17 + len as u32 + sum(&p[..len]));
+        w16(&mut p, 6, if checksum == 0 { u16::MAX } else { checksum });
         self.state = 2;
         self.status = "Resolving hostname";
         self.ip_send(self.config.dns, 17, &p[..len], true)
@@ -509,6 +672,8 @@ impl Network {
             return;
         }
         self.host.set(host);
+        self.dns_name.set(host.trim_end_matches('.'));
+        self.dns_aliases = 0;
         self.path.set("/");
         self.path.append(path);
         if self.wifi.joined && self.secure {
@@ -541,8 +706,8 @@ impl Network {
         if !numeric {
             self.remote = [0; 4]
         }
-        self.port = 49152 + (ticks() % 15000) as u16;
-        if self.dhcp.is_some() || self.config.ip == [0; 4] {
+        self.port = 49152 + (entropy() % 16384) as u16;
+        if self.config.ip == [0; 4] {
             self.fail("Ethernet has no active IPv4 lease");
             return;
         }
@@ -553,15 +718,14 @@ impl Network {
         });
     }
     fn resolve_hop(&mut self, destination: Address) {
-        let on_link =
-            (0..4).all(|i| (destination[i] ^ self.config.ip[i]) & self.config.mask[i] == 0);
-        self.next_hop = if on_link {
-            destination
-        } else {
-            self.config.router
-        };
-        if destination == [0; 4] || self.next_hop == [0; 4] {
+        let Some(hop) = self.config.route(destination) else {
             self.fail("No IPv4 route or DNS server configured");
+            return;
+        };
+        self.next_hop = hop;
+        if let Some(mac) = self.neighbor(hop) {
+            self.gateway = mac;
+            self.resolved_hop();
             return;
         }
         self.state = 1;
@@ -570,11 +734,32 @@ impl Network {
         self.deadline = millis() + 1000;
         self.arp(false, [0; 6], self.next_hop)
     }
+    fn resolved_hop(&mut self) {
+        if self.remote == [0; 4] {
+            self.dns()
+        } else {
+            self.connect()
+        }
+    }
     pub fn poll(&mut self) {
         if !self.online() {
             return;
         }
-        self.dhcp_tick();
+        let link_up = self.link_speed().is_some();
+        if self.link_up && !link_up {
+            self.neighbors.fill(None);
+            if self.state != 0 && !(self.secure && self.wifi.joined) {
+                self.fail("Ethernet link disconnected");
+            }
+        } else if !self.link_up && link_up && self.lease.is_none() {
+            if let Some(discovery) = &mut self.dhcp {
+                discovery.deadline = millis();
+            }
+        }
+        self.link_up = link_up;
+        if link_up {
+            self.dhcp_tick();
+        }
         for _ in 0..16 {
             let mut f = [0u8; 1536];
             let len = if let Some(adapter) = &mut self.intel {
@@ -655,7 +840,7 @@ impl Network {
         self.changed = true;
     }
     fn frame(&mut self, f: &[u8]) {
-        if f.len() < 14 {
+        if f.len() < 14 || (f[..6] != self.mac && f[..6] != [255; 6]) {
             return;
         }
         let mut untagged = [0; 1536];
@@ -684,16 +869,28 @@ impl Network {
                 mac.copy_from_slice(&f[22..28]);
                 let mut addr = [0; 4];
                 addr.copy_from_slice(&f[28..32]);
-                if u16be(f, 20) == 1 && f[38..42] == self.config.ip {
-                    self.arp(true, mac, addr)
+                let operation = u16be(f, 20);
+                if f[38..42] != self.config.ip
+                    || f[6..12] != mac
+                    || mac == [0; 6]
+                    || mac[0] & 1 != 0
+                {
+                    return;
                 }
-                if addr == self.next_hop && f[38..42] == self.config.ip {
-                    self.gateway = mac;
-                    if self.state == 1 {
-                        if self.remote == [0; 4] {
-                            self.dns()
-                        } else {
-                            self.connect()
+                if operation == 1 {
+                    self.arp(true, mac, addr);
+                } else if operation == 2 && f[32..38] == self.mac && dhcp::unicast(addr) {
+                    let lease_hop = self
+                        .lease
+                        .as_ref()
+                        .and_then(|lease| self.config.route(lease.server));
+                    if (self.state == 1 && addr == self.next_hop)
+                        || (self.dhcp.is_some() && lease_hop == Some(addr))
+                    {
+                        self.remember_neighbor(addr, mac);
+                        if self.state == 1 && addr == self.next_hop {
+                            self.gateway = mac;
+                            self.resolved_hop();
                         }
                     }
                 }
@@ -719,66 +916,43 @@ impl Network {
         }
         let d = &p[h..total];
         if p[9] == 17 && d.len() >= 8 && u16be(d, 0) == 67 && u16be(d, 2) == 68 {
-            let size = u16be(d, 4) as usize;
-            if let Some(bootp) = d.get(8..size) {
+            if let Some(bootp) = udp_payload(&p[12..20], d) {
                 self.dhcp_reply(bootp);
             }
             return;
         }
-        if p[16..20] != self.config.ip {
+        if self.config.ip == [0; 4] || p[16..20] != self.config.ip {
             return;
         }
         if p[9] == 17
             && self.state == 2
             && p[12..16] == self.config.dns
-            && d.len() >= 20
+            && d.len() >= 8
             && u16be(d, 0) == 53
-            && u16be(d, 2) == 53000
-            && u16be(d, 8) == self.port
+            && u16be(d, 2) == self.dns_port
         {
-            let plen = u16be(d, 4) as usize;
-            if plen < 20 || plen > d.len() {
+            use crate::dns::Answer;
+            let Some(answer) = udp_payload(&p[12..20], d)
+                .and_then(|q| crate::dns::response(q, self.dns_id, self.dns_name.str().as_bytes()))
+            else {
                 return;
-            }
-            let q = &d[8..plen];
-            if q[3] & 15 != 0 {
-                self.fail("DNS name was not found");
-                return;
-            }
-            let mut pos = 12;
-            for _ in 0..u16be(q, 4) {
-                pos = match skip_name(q, pos) {
-                    Some(v) => v,
-                    None => return,
-                };
-                pos += 4;
-                if pos > q.len() {
-                    return;
+            };
+            match answer {
+                Answer::Address(ip) => {
+                    self.remote = ip;
+                    self.resolve_hop(ip);
                 }
+                Answer::Alias(target, len) if self.dns_aliases < 8 => {
+                    self.dns_aliases += 1;
+                    self.dns_name
+                        .set(core::str::from_utf8(&target[..len]).unwrap_or_default());
+                    self.dns();
+                }
+                Answer::Alias(..) => self.fail("DNS alias limit exceeded"),
+                Answer::Missing => self.fail("DNS name has no IPv4 address"),
+                Answer::ServerError => self.fail("DNS server returned an error"),
+                Answer::Truncated => self.fail("DNS reply was truncated"),
             }
-            for _ in 0..u16be(q, 6) {
-                pos = match skip_name(q, pos) {
-                    Some(v) => v,
-                    None => return,
-                };
-                if pos + 10 > q.len() {
-                    return;
-                }
-                let kind = u16be(q, pos);
-                let class = u16be(q, pos + 2);
-                let len = u16be(q, pos + 8) as usize;
-                pos += 10;
-                if pos + len > q.len() {
-                    return;
-                }
-                if kind == 1 && class == 1 && len == 4 {
-                    self.remote.copy_from_slice(&q[pos..pos + 4]);
-                    self.resolve_hop(self.remote);
-                    return;
-                }
-                pos += len
-            }
-            self.fail("DNS response has no IPv4 address");
         } else if p[9] == 6
             && self.state >= 3
             && p[12..16] == self.remote
@@ -880,24 +1054,14 @@ impl Network {
         }
     }
 }
-fn skip_name(p: &[u8], mut n: usize) -> Option<usize> {
-    for _ in 0..128 {
-        let b = *p.get(n)?;
-        if b & 0xc0 == 0xc0 {
-            return if n + 2 <= p.len() { Some(n + 2) } else { None };
-        }
-        if b == 0 {
-            return Some(n + 1);
-        }
-        if b > 63 {
-            return None;
-        }
-        n += 1 + b as usize;
-        if n > p.len() {
-            return None;
-        }
+fn udp_payload<'a>(addresses: &[u8], packet: &'a [u8]) -> Option<&'a [u8]> {
+    let declared = u16be(packet, 4) as usize;
+    let udp = packet.get(..declared)?;
+    let payload = udp.get(8..)?;
+    if u16be(udp, 6) != 0 && fold(sum(addresses) + 17 + declared as u32 + sum(udp)) != 0 {
+        return None;
     }
-    None
+    Some(payload)
 }
 /// Text layout for HTML bodies. Suppresses script/style and decodes common entities.
 pub fn readable(src: &str, out: &mut Text<12288>) {

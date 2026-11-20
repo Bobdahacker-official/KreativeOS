@@ -25,13 +25,23 @@ For QEMU, install `qemu-system-x86` and `ovmf`, then run:
 bash scripts/run.sh
 ```
 
+On Windows, install stable Rust, Python 3 and QEMU, then run from PowerShell:
+
+```powershell
+rustup target add x86_64-unknown-uefi
+.\scripts\build.ps1
+.\scripts\run.ps1 -Headless
+```
+
+The headless launch writes serial output to `build/serial.log`. Omit `-Headless` to open the desktop. Set `KREATIVE_PYTHON` or `KREATIVE_QEMU` to the executable path if automatic discovery fails.
+
 Set `OVMF_CODE` and `OVMF_VARS` if your firmware files use different paths. The supplied machine uses 256 MiB RAM, standard VGA, PS/2 input, RTL8139 Ethernet, a VirtIO boot disk (read by UEFI), and an IDE primary-master data disk. The operating system contains no Linux components; Linux, macOS or Windows can be used as a build host.
 
 GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and checks HTTPS against local TLS servers. It uploads the images, serial logs and desktop screenshot as `KreativeOS-x86_64`.
 
 ## Desktop
 
-- tiny-skia vector icons, a composited pointer, antialiased Open Sans, a jade grid wallpaper, a full-width taskbar, and a two-column app launcher. Windows support dragging, minimizing, maximizing and closing.
+- tiny-skia vector icons, a composited pointer, antialiased Open Sans, an aurora wallpaper, and a two-column app launcher. Click 1–4 at the top right to switch workspaces. Windows support dragging, minimizing, maximizing and closing.
 - PS/2 keyboard, standard PS/2 mice, and IntelliMouse-compatible scroll wheels.
 - Files and Notes with a persistent, checksummed, two-snapshot KFS volume.
 - Terminal with file operations, app launching, network status, calculation and reboot.
@@ -42,18 +52,20 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 - Snake with food, scoring, self-collision, wall collision and restart.
 - Two-player Tic Tac Toe with turn management, win detection and restart.
 - Local KAPP1 document packages, installation persistence and a launcher entry.
-- Network settings for Ethernet and ESP-AT Wi-Fi.
+- Separate Ethernet and ESP-AT Wi-Fi panels. Ethernet shows link speed, the active IPv4 configuration and remaining DHCP lease time, and saves automatic or manual profiles with a VLAN setting.
 - Settings with three accent colors, save-all and restart.
 
 F1–F10 open Files through Settings. Escape toggles the launcher. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter; use Up/Down to scroll. Snake uses arrow keys and Space to restart.
 
 ## Networking and hardware
 
-The supplied configuration uses QEMU user networking: IPv4 `10.0.2.15/24`, gateway `10.0.2.2`, DNS `10.0.2.3`. Ethernet supports PCI RTL8139 and Intel 82540EM, 82544GC, 82545EM, and 82574L. QEMU defaults to RTL8139. Set `NIC_MODEL=e1000` for 82540EM or `NIC_MODEL=e1000e` for 82574L. The stack implements Ethernet, ARP, IPv4 validation, UDP DNS lookup and a single bounded TCP/HTTP connection with retransmission and timeout handling.
+Ethernet requests an IPv4 lease automatically on boot. It renews with the original DHCP server and broadcasts a rebind request if renewal fails. Network → Ethernet can save an automatic or manual profile to the data disk. Use VLAN 0 for an untagged network and `0.0.0.0` for an unused gateway or resolver in manual settings. The QEMU user network normally assigns `10.0.2.15/24`, gateway `10.0.2.2`, and DNS `10.0.2.3`.
+
+Ethernet supports PCI RTL8139 and Intel 82540EM, 82544GC, 82545EM, and 82574L. QEMU defaults to RTL8139. Set `NIC_MODEL=e1000` for 82540EM or `NIC_MODEL=e1000e` for 82574L. The stack implements Ethernet, ARP, IPv4, UDP DNS with CNAME resolution, and a single bounded TCP/HTTP connection with retransmission and timeouts. DNS is IPv4 only. It reports truncated UDP replies and does not retry them over TCP.
 
 Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. The browser shows page text, the first compatible HTML image and a Play sound button for the first WAV audio source. Direct HTTPS links to PNG, JPEG, BMP and WAV also open. Media responses are capped at 768 KiB. HTTP uses port 80 and HTTP/1.0 connection-close semantics. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. The browser supports authenticated HTTPS redirects and chunked response bodies. Plain HTTP uses the Ethernet interface.
 
-The kernel is a single-address-space system with a cooperative app event loop and polled drivers. It currently uses firmware-established CPU mappings. USB input, process isolation, SMP and general-purpose native executable loading are not implemented. Paint content stays in memory. KAPP packages contain document apps, not native machine code.
+The graphical desktop uses a cooperative event loop and polled drivers. KR3 programs enter CPU ring 3 in separate address spaces. Paint content stays in memory. KAPP packages contain document apps.
 
 ## Wi-Fi and sound
 
@@ -94,5 +106,35 @@ save
 ```
 
 The included `Guide.kapp` is installed as `Guide.app`. Its KAPP1 header contains a name, version and document body. Installation validates the format and writes the installed document to KFS.
+
+## Develop on the host
+
+Put UTF-8 `.txt`, `.html` and `.ksh` files or binary `.kr3` programs in a directory and point `KREATIVE_DEV_DIR` at it before building. The builder embeds them in the boot image. Each file can hold up to 2 KiB, and names can contain up to 32 printable ASCII characters. Inside the guest, open Terminal and run:
+
+```text
+dev list
+dev import
+run setup.ksh
+browse file:Demo.html
+```
+
+`dev import` preserves existing filenames. Import requires sufficient free KFS file slots. A `.ksh` file contains one KreativeOS terminal command per line and runs when the administrator invokes `run`.
+
+### Accounts and native programs
+
+1. On a fresh data disk, run `accounts` in Terminal to set the administrator password. Once configured, KreativeOS starts at sign-in.
+2. Run `accounts add` as `admin` to create a standard account. Run `accounts` to list accounts and available administration commands.
+3. Name a program `alice.hello.kr3` to assign it to `alice`. Use `dev import` to install the program to KFS. The administrator can also try it with `exec alice.hello.kr3` from Terminal.
+4. Run `lock` and sign in as `alice`. In the user console, run `ls` and then `exec hello.kr3`. Use `passwd` to change the account password or `logout` to return to sign-in.
+
+The administrator has the desktop and KFS management tools. Standard accounts enter a console whose executable lookup is scoped to the signed-in username. The KR3 runner maps executable code and a writable, non-executable stack into CPU ring 3. An invalid memory access or a CPU exception stops the program. The local APIC timer limits each run to roughly 250 ms.
+
+Build the example with NASM:
+
+```sh
+nasm -f bin examples/user/hello.asm -o alice.hello.kr3
+```
+
+KR3 version 1 takes a flat x86-64 binary with the four-byte header `4b 52 33 01`. Execution starts at the first byte after the header, mapped at `0x400000000000`. Use RIP-relative addressing. The writable stack is one 4 KiB page, with an unmapped gap below it. The `int 0x80` ABI uses EAX for the call number. Call 0 exits with EBX as the status. Call 1 writes up to 512 bytes from RBX with length in RSI, returning the byte count in RAX. RCX, RDX, R8–R11 and volatile SSE registers may change across a system call.
 
 See [architecture](docs/architecture.md), [UI references](docs/design.md) and [verification](docs/verification.md).

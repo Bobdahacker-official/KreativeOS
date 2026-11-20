@@ -7,10 +7,10 @@ use crate::{
     text::Text,
 };
 use core::fmt::Write;
-const INK: u32 = 0x20363a;
-const MUTED: u32 = 0x566a69;
+pub(crate) const INK: u32 = 0x20363a;
+pub(crate) const MUTED: u32 = 0x566a69;
 const PANEL: u32 = 0xf4f5ed;
-const SURFACE: u32 = 0xe5ebe0;
+pub(crate) const SURFACE: u32 = 0xe5ebe0;
 const NAMES: [&str; 14] = [
     "Files",
     "Notes",
@@ -189,6 +189,8 @@ struct Desktop {
     wifi_pass: Text<63>,
     wifi_password_field: bool,
     wifi_status: &'static str,
+    ethernet: crate::ethernet::Editor,
+    ethernet_tab: bool,
     access_points: alloc::vec::Vec<crate::wifi::AccessPoint>,
     scanning_results: bool,
     access_point_offset: usize,
@@ -216,6 +218,7 @@ struct Desktop {
     winner: u8,
     images: Catalog,
     organizer: crate::organizer::Organizer,
+    users: crate::users::Session,
 }
 impl Desktop {
     fn new(w: usize, h: usize) -> Self {
@@ -298,6 +301,9 @@ impl Desktop {
             winner: 0,
             images: Catalog::new(),
             organizer: crate::organizer::Organizer::new(),
+            users: crate::users::Session::new(),
+            ethernet: crate::ethernet::Editor::new(),
+            ethernet_tab: true,
         };
         for i in 0..APP_COUNT {
             d.windows[i].w = (w as i32 - 90).min(760);
@@ -893,6 +899,10 @@ impl Desktop {
         }
     }
     fn key(&mut self, key: u8, n: &mut Network) {
+        if self.users.visible() {
+            self.users.key(key);
+            return;
+        }
         if key == 0xab {
             self.magnifier = !self.magnifier;
             return;
@@ -910,14 +920,7 @@ impl Desktop {
             return;
         }
         if (0xa3..=0xa6).contains(&key) {
-            self.workspace = (key - 0xa3) as usize;
-            self.focus = self
-                .order
-                .iter()
-                .rev()
-                .copied()
-                .find(|&id| self.visible(id))
-                .unwrap_or(APP_COUNT);
+            self.switch_workspace((key - 0xa3) as usize);
             return;
         }
         if self.search.is_some() {
@@ -1064,6 +1067,7 @@ impl Desktop {
                     self.snake.next = v
                 }
             }
+            8 if self.ethernet_tab => self.ethernet.key(key, n),
             8 if self.scanning_results => match key {
                 8 => self.scanning_results = false,
                 0x80 => self.access_point_offset = self.access_point_offset.saturating_sub(1),
@@ -1113,6 +1117,18 @@ impl Desktop {
             self.scanning_results = false;
         }
     }
+    fn switch_workspace(&mut self, workspace: usize) {
+        self.workspace = workspace;
+        self.focus = self
+            .order
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| self.visible(id))
+            .unwrap_or(APP_COUNT);
+        self.menu = false;
+        self.tray = false;
+    }
     fn select_tray(&mut self, tab: usize) {
         self.tray_tab = tab;
         if tab == 1 && self.devices.is_empty() {
@@ -1155,7 +1171,7 @@ impl Desktop {
         self.terminal.push(b'\n');
         let (verb, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
         match verb{
- "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nziplist NAME | unzip NAME | run NAME\nsdk | install NAME.kapp | snapshot | reboot\n"),
+ "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nziplist NAME | unzip NAME | run NAME\ndev list | dev import | exec NAME.kr3\naccounts | lock | sdk | install NAME.kapp | snapshot | reboot\n"),
  "ls"=>unsafe{for f in &storage::FILES{if f.used{let _=writeln!(self.terminal,"{}  {} bytes",f.name.str(),f.data.len);}}},
  "cat"=>{if let Some(i)=storage::find(arg){unsafe{self.terminal.append(storage::FILES[i].data.str())}}else{self.terminal.append("File not found")}},
  "touch"=>{match storage::put(arg,b""){Ok(())=>{self.terminal.append(if storage::sync(){"Created on disk"}else{"Created in memory"})},Err(e)=>self.terminal.append(e)}},
@@ -1182,6 +1198,22 @@ impl Desktop {
  "calc"=>{self.calc.set(arg);self.calculate();self.terminal.append(self.answer.str())},
  "install"=>{if let Some(index) = crate::packages::CATALOG.iter().position(|p| p.source == arg) { self.package_install(index, false); self.terminal.append(self.notice.str()); } else { self.terminal.append("Package is not in the signed catalog"); }},
  "sdk"=>self.package_install(1, true),
+ "dev"=>crate::developer::command(arg, &mut self.terminal),
+ "accounts" if allow_script=>self.users.manage(arg, &mut self.terminal),
+ "lock" if allow_script=>{
+     self.checkpoint_draft(true);
+     if !self.users.lock() { self.terminal.append("Run accounts to enable sign-in"); }
+ },
+ "exec" if allow_script => {
+     if let Some(index) = storage::find(arg) {
+         let binary = unsafe { storage::FILES[index].data };
+         if let Err(error) = crate::ring3::run(&binary.bytes[..binary.len], &mut self.terminal) {
+             self.terminal.append(error);
+         }
+     } else {
+         self.terminal.append("User executable was not found");
+     }
+ },
  "ziplist"=>self.archive(arg, false),
  "unzip"=>self.archive(arg, true),
  "run" if allow_script => {
@@ -1228,6 +1260,12 @@ impl Desktop {
     fn mouse(&mut self, dx: i32, dy: i32, buttons: u8, wheel: i32, s: &Screen, n: &mut Network) {
         self.mx = (self.mx + dx).clamp(0, s.w as i32 - 1);
         self.my = (self.my + dy).clamp(0, s.h as i32 - 1);
+        if self.users.visible() {
+            self.buttons = buttons;
+            self.drag = None;
+            self.painting = false;
+            return;
+        }
         if wheel != 0 && self.focus < APP_COUNT && self.visible(self.focus) {
             let focused = self.windows[self.focus];
             if focused.open && !focused.min && focused.inside(self.mx, self.my) {
@@ -1321,6 +1359,7 @@ impl Desktop {
                         self.select_tray(((px - 12) / 120) as usize);
                     } else if self.tray_tab == 0 && (211..247).contains(&py) {
                         if px < 132 {
+                            self.ethernet_tab = false;
                             self.open(8);
                         } else if px < 252 {
                             self.notice.set(if n.start_dhcp(n.vlan) {
@@ -1360,6 +1399,17 @@ impl Desktop {
                     }
                 }
                 self.menu = false;
+                return;
+            }
+            let width = s.w as i32;
+            if (width - 194..width - 18).contains(&x)
+                && (10..38).contains(&y)
+                && !self
+                    .order
+                    .iter()
+                    .any(|&id| self.visible(id) && self.windows[id].inside(x, y))
+            {
+                self.switch_workspace(((x - (width - 194)) / 44) as usize);
                 return;
             }
             for j in (0..APP_COUNT).rev() {
@@ -1528,17 +1578,21 @@ impl Desktop {
                 }
             }
             8 => {
-                if self.scanning_results {
-                    if (48..84).contains(&y) && x < 150 {
+                if (46..80).contains(&y) && (24..246).contains(&x) {
+                    self.ethernet_tab = x < 136;
+                } else if self.ethernet_tab {
+                    self.ethernet.click(x, y, self.windows[8].w, n);
+                } else if self.scanning_results {
+                    if (46..80).contains(&y) && (254..366).contains(&x) {
                         self.scanning_results = false;
-                    } else if (48..84).contains(&y) && x < 275 {
+                    } else if (46..80).contains(&y) && (374..486).contains(&x) {
                         self.scan_wifi(n);
                     } else if y >= 127 && x >= 24 {
                         self.select_access_point(
                             self.access_point_offset + ((y - 127) / 29) as usize,
                         );
                     }
-                } else if (48..84).contains(&y) && x >= self.windows[8].w - 145 {
+                } else if (46..80).contains(&y) && (254..366).contains(&x) {
                     self.scan_wifi(n);
                 } else if (177..212).contains(&y) {
                     self.wifi_password_field = false;
@@ -1642,6 +1696,10 @@ impl Desktop {
         }
     }
     fn draw(&self, s: &mut Screen, n: &Network) {
+        if self.users.visible() {
+            self.users.draw(s);
+            return;
+        }
         let w = s.w as i32;
         let h = s.h as i32;
         if self.workspace == 0 {
@@ -1656,8 +1714,31 @@ impl Desktop {
             );
         }
         s.theme = self.theme;
-        s.symbol(28, 25, 14, 0x9dd7bb);
-        s.text(56, 22, "KreativeOS", 0xe2eee5, 3);
+        s.rounded(14, 8, 130, 32, 8, 0x1c2c3c, 255);
+        s.symbol(24, 14, 14, 0x87e3d1);
+        s.text(51, 15, "KreativeOS", 0xf1f7fa, 1);
+        for (i, label) in ["1", "2", "3", "4"].iter().enumerate() {
+            let xx = w - 194 + i as i32 * 44;
+            let selected = i == self.workspace;
+            s.rounded(
+                xx,
+                10,
+                40,
+                28,
+                7,
+                if selected { 0x80bdab } else { 0x203538 },
+                255,
+            );
+            s.centered(
+                xx,
+                10,
+                40,
+                28,
+                label,
+                if selected { INK } else { 0xecf7f2 },
+                1,
+            );
+        }
         for &id in &self.order {
             let window = self.windows[id];
             if self.visible(id) {
@@ -1666,15 +1747,15 @@ impl Desktop {
         }
 
         let bar_y = h - BAR;
-        s.rect(0, bar_y, w, BAR, 0x11262d);
-        s.rect(0, bar_y, w, 1, 0x45645b);
+        s.rect(0, bar_y, w, BAR, 0x111b2a);
+        s.rect(0, bar_y, w, 1, 0x3c5063);
         s.rounded(
             12,
             bar_y + 8,
             106,
             38,
-            6,
-            if self.menu { 0x568978 } else { 0x284b4b },
+            9,
+            if self.menu { 0x417278 } else { 0x26394e },
             255,
         );
         s.symbol(22, bar_y + 16, 14, 0xe4f5ea);
@@ -1685,7 +1766,7 @@ impl Desktop {
             let selected = self.focus == id && self.visible(id);
             let hover = (left..left + step).contains(&self.mx) && self.my >= bar_y;
             if selected || hover {
-                s.rounded(left + 2, bar_y + 7, step - 4, 40, 5, 0x315552, 255);
+                s.rounded(left + 2, bar_y + 7, step - 4, 40, 8, 0x25394c, 255);
             }
             s.symbol(
                 left + (step - 20) / 2,
@@ -1712,7 +1793,7 @@ impl Desktop {
         let (hh, mm, _) = hardware::clock();
         let mut clock: Text<12> = Text::new();
         let _ = write!(clock, "{:02}:{:02}", hh, mm);
-        s.rect(w - 89, bar_y + 11, 1, 32, 0x45645b);
+        s.rect(w - 89, bar_y + 11, 1, 32, 0x40546a);
         s.centered(w - 87, bar_y + 6, 80, 23, clock.str(), 0xe3f4ea, 2);
         s.centered(
             w - 87,
@@ -1721,8 +1802,10 @@ impl Desktop {
             16,
             if n.wifi.joined {
                 "Wi-Fi"
-            } else if n.online() {
+            } else if n.link_speed().is_some() && n.config.ip != [0; 4] {
                 "Ethernet"
+            } else if n.link_speed().is_some() {
+                "No IPv4"
             } else {
                 "Offline"
             },
@@ -1901,14 +1984,23 @@ impl Desktop {
         let h = a.h;
         let active = self.focus == id;
         s.shadow(x, y, w, h);
-        s.rounded(x, y, w, h, 8, PANEL, 255);
+        s.rounded(
+            x,
+            y,
+            w,
+            h,
+            10,
+            if active { 0x5e8998 } else { 0x4e606c },
+            255,
+        );
+        s.rounded(x + 1, y + 1, w - 2, h - 2, 9, PANEL, 255);
         s.rounded(
             x + 1,
             y + 1,
             w - 2,
             37,
-            7,
-            if active { 0x25464a } else { 0x36565a },
+            8,
+            if active { 0x203349 } else { 0x37465a },
             255,
         );
         s.rect(
@@ -1916,11 +2008,10 @@ impl Desktop {
             y + 35,
             w - 2,
             3,
-            if active { 0x79b89a } else { 0x647f79 },
+            if active { 0x6bc7b3 } else { 0x6a7c8b },
         );
         s.symbol(x + 11, y + 8, id, 0xb3d9c6);
-        let title_x = x + 114;
-        s.centered(title_x, y + 1, w - 228, 34, NAMES[id], 0xf2f7f1, 2);
+        s.text(x + 42, y + 9, NAMES[id], 0xf2f7f1, 1);
         for (i, label) in ["_", "+", "x"].iter().enumerate() {
             let left = x + w - 114 + i as i32 * 38;
             let over = (left..left + 38).contains(&self.mx) && (y..y + 36).contains(&self.my);
@@ -2275,9 +2366,38 @@ impl Desktop {
                 s.wrapped(x + 24, y + 285, w - 48, 100, self.notice.str(), INK);
             }
             8 => {
+                button(
+                    s,
+                    x + 24,
+                    y + 46,
+                    104,
+                    "Ethernet",
+                    if self.ethernet_tab {
+                        self.accent
+                    } else {
+                        SURFACE
+                    },
+                );
+                button(
+                    s,
+                    x + 136,
+                    y + 46,
+                    104,
+                    "Wi-Fi",
+                    if self.ethernet_tab {
+                        SURFACE
+                    } else {
+                        self.accent
+                    },
+                );
+                if self.ethernet_tab {
+                    self.ethernet.draw(s, x, y, w, n, self.accent);
+                    s.clip = clip;
+                    return;
+                }
                 if self.scanning_results {
-                    button(s, x + 24, y + 48, 112, "Back", SURFACE);
-                    button(s, x + 150, y + 48, 112, "Scan again", self.accent);
+                    button(s, x + 254, y + 46, 112, "Back", SURFACE);
+                    button(s, x + 374, y + 46, 112, "Scan again", self.accent);
                     s.text(x + 24, y + 95, self.wifi_status, MUTED, 1);
                     let rows = ((h - 128) / 29).max(0) as usize;
                     for (row, point) in self
@@ -2321,8 +2441,7 @@ impl Desktop {
                     s.clip = clip;
                     return;
                 }
-                s.text(x + 24, y + 58, "Network", INK, 3);
-                button(s, x + w - 145, y + 48, 120, "Scan Wi-Fi", self.accent);
+                button(s, x + 254, y + 46, 112, "Scan Wi-Fi", SURFACE);
                 let mut status: Text<128> = Text::new();
                 let _ = write!(
                     status,
@@ -2593,7 +2712,7 @@ pub(crate) fn clip_label(label: &str, width: i32, size: i32) -> &str {
     &label[..end]
 }
 
-fn button(s: &mut Screen, x: i32, y: i32, w: i32, label: &str, c: u32) {
+pub(crate) fn button(s: &mut Screen, x: i32, y: i32, w: i32, label: &str, c: u32) {
     s.rounded(x, y, w, 34, 6, c, 255);
     s.centered(
         x,

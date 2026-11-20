@@ -8,9 +8,12 @@ mod ax210;
 mod ax_dma;
 mod boot;
 mod desktop;
+mod developer;
 mod devices;
 mod dhcp;
+mod dns;
 mod e1000;
+mod ethernet;
 mod graphics;
 mod hardware;
 mod memory;
@@ -18,9 +21,11 @@ mod net;
 mod organizer;
 mod packages;
 mod pictures;
+mod ring3;
 mod secure;
 mod storage;
 mod text;
+mod users;
 mod web;
 mod wifi;
 
@@ -35,7 +40,9 @@ pub unsafe extern "efiapi" fn efi_main(image: usize, system: *mut boot::SystemTa
         hardware::init();
         storage::init();
         audio::init();
-        let network = net::Network::new();
+        let mut network = net::Network::new();
+        #[cfg(not(feature = "tls-smoke"))]
+        ethernet::configure_at_boot(&mut network);
         #[cfg(feature = "tls-smoke")]
         let network = {
             let mut network = network;

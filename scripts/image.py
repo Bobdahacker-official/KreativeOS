@@ -87,6 +87,34 @@ if firmware:
     firmware_cluster = allocate(data)
     slot = root_pos + (64 if image[root_pos+32] else 32)
     image[slot:slot+32] = entry('AX210   UCO', 32, firmware_cluster, len(data))
+source_dir = os.environ.get('KREATIVE_DEV_DIR')
+if source_dir:
+    source = Path(source_dir)
+    if not source.is_dir():
+        raise ValueError('KREATIVE_DEV_DIR must point to a directory')
+    inputs = sorted(p for p in source.iterdir()
+                    if p.is_file() and p.suffix in {'.txt', '.html', '.ksh', '.kr3'})
+    if not 1 <= len(inputs) <= 24:
+        raise ValueError('A developer pack requires 1 to 24 .txt, .html, .ksh or .kr3 files')
+    developer = bytearray(b'KDP1')
+    for path in inputs:
+        name = path.name.encode('ascii')
+        if not 1 <= len(name) <= 32 or any(c < 32 or c > 126 or c == 92 for c in name):
+            raise ValueError(f'{path.name}: expected a printable ASCII name of up to 32 bytes')
+        with path.open('rb') as file:
+            data = file.read(2049)
+        if len(data) > 2048:
+            raise ValueError(f'{path.name}: exceeds the KFS file limit of 2048 bytes')
+        if path.suffix == '.kr3':
+            if not data.startswith(b'KR3\x01') or len(data) <= 4:
+                raise ValueError(f'{path.name}: expected a KR3 version 1 executable')
+        else:
+            data.decode('utf-8')
+        developer.extend(struct.pack('<BH', len(name), len(data)))
+        developer.extend(name + data)
+    developer_cluster = allocate(developer)
+    slot = next(pos for pos in range(root_pos + 32, root_pos + 128, 32) if not image[pos])
+    image[slot:slot+32] = entry('DEVELOP KDP', 32, developer_cluster, len(developer))
 for i in range(2):
     pos = base + (reserved + i * fat_sectors) * sector
     image[pos:pos+len(fat)] = fat

@@ -437,19 +437,15 @@ impl Screen {
                     for x in 0..self.w {
                         let fx = x as f32 / self.w as f32;
                         let fy = y as f32 / self.h as f32;
-                        let glow =
-                            (1.0 - ((fx - 0.77).abs() * 0.6 + (fy - 0.67).abs())).clamp(0., 1.);
-                        let sweep = (fx * 0.73 - fy * 0.68) + 0.16;
-                        let mut c = mix(0x14252c, 0x2b5352, (255. * glow * glow) as u32);
-                        if (0.20..0.40).contains(&sweep) {
-                            c = mix(c, 0x518071, 75);
-                        }
-                        if (0.405..0.418).contains(&sweep) {
-                            c = mix(c, 0x83a791, 84);
-                        }
-                        let grid = x % 32 == 0 && y % 32 == 0;
-                        if grid {
-                            c = mix(c, 0xa4c4b3, 48);
+                        let dx = fx - 0.85;
+                        let dy = fy - 0.70;
+                        let light = (1.0 - (dx * dx * 1.8 + dy * dy * 3.4)).max(0.0);
+                        let mut c = mix(0x101521, 0x19585d, (255. * light * light) as u32);
+                        let wave = fy - (0.48 + fx * 0.40 - fx * fx * 0.74);
+                        let haze = (1.0 - wave.abs() * 6.5).max(0.0);
+                        c = mix(c, 0x53609d, (104.0 * haze * haze) as u32);
+                        if x % 28 == 0 && y % 28 == 0 {
+                            c = mix(c, 0x92b6c6, 29);
                         }
                         WALLPAPER[y * self.w + x] = c;
                     }
