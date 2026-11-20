@@ -57,7 +57,8 @@ pub fn init() {
                 *to = from.alpha();
             }
         }
-        let mut pointer = Pixmap::new(24, 29).expect("cursor pixmap");
+        let mut pointer = Pixmap::new(16, 20).expect("cursor pixmap");
+        let scale = Transform::from_scale(0.67, 0.67);
         let mut shape = PathBuilder::new();
         shape.move_to(1.5, 1.5);
         shape.line_to(2.0, 22.0);
@@ -74,17 +75,11 @@ pub fn init() {
                 &path,
                 &paint,
                 FillRule::Winding,
-                Transform::from_translate(1.1, 1.2),
+                Transform::from_row(0.67, 0.0, 0.0, 0.67, 0.7, 0.8),
                 None,
             );
             paint.set_color_rgba8(250, 253, 249, 255);
-            pointer.fill_path(
-                &path,
-                &paint,
-                FillRule::Winding,
-                Transform::identity(),
-                None,
-            );
+            pointer.fill_path(&path, &paint, FillRule::Winding, scale, None);
             paint.set_color_rgba8(18, 36, 40, 255);
             pointer.stroke_path(
                 &path,
@@ -94,7 +89,7 @@ pub fn init() {
                     line_join: LineJoin::Round,
                     ..Stroke::default()
                 },
-                Transform::identity(),
+                scale,
                 None,
             );
         }

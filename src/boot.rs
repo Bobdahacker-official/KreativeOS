@@ -116,19 +116,37 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
         return None;
     }
     let gop = ptr as *mut Gop;
-    // Select a supported 1024x768 or 1280x800 mode, freeing query allocations.
+    // Retain a usable firmware-selected widescreen mode, or choose a compact desktop mode.
     type Query = unsafe extern "efiapi" fn(*mut Gop, u32, *mut usize, *mut *mut Info) -> usize;
     type Free = unsafe extern "efiapi" fn(*mut c_void) -> usize;
     let query: Query = core::mem::transmute((*gop).query);
     let free: Free = core::mem::transmute(bs.free_pool);
+    let mut preferred = [None; 3];
     for n in 0..(*(*gop).mode).max {
         let mut size = 0;
         let mut info = core::ptr::null_mut();
         if query(gop, n, &mut size, &mut info) == 0 {
-            let chosen = (*info).width == 1024 && (*info).height == 768 && (*info).format <= 1;
+            if (*info).format <= 1 {
+                let rank = match ((*info).width, (*info).height) {
+                    (1280, 720) => Some(0),
+                    (1280, 800) => Some(1),
+                    (1024, 768) => Some(2),
+                    _ => None,
+                };
+                if let Some(rank) = rank {
+                    preferred[rank] = Some(n);
+                }
+            }
             free(info.cast());
-            if chosen {
-                ((*gop).set)(gop, n);
+        }
+    }
+    let current = &*(*(*gop).mode).info;
+    let widescreen = current.format <= 1
+        && (1280..=1440).contains(&current.width)
+        && (720..=900).contains(&current.height);
+    if !widescreen {
+        for mode in preferred.into_iter().flatten() {
+            if ((*gop).set)(gop, mode) == 0 {
                 break;
             }
         }

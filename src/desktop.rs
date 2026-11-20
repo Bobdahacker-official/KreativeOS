@@ -1796,7 +1796,7 @@ impl Desktop {
 
         let bar_y = h - BAR;
         s.rect(0, bar_y, w, BAR, 0x111b2a);
-        s.rect(0, bar_y, w, 1, 0x3c5063);
+        s.rect(0, bar_y, w, 2, 0x5d8396);
         s.rounded(
             12,
             bar_y + 8,
@@ -1813,14 +1813,26 @@ impl Desktop {
             let left = 124 + slot as i32 * step;
             let selected = self.focus == id && self.visible(id);
             let hover = (left..left + step).contains(&self.mx) && self.my >= bar_y;
-            if selected || hover {
-                s.rounded(left + 2, bar_y + 7, step - 4, 40, 8, 0x25394c, 255);
-            }
+            s.rounded(
+                left + 3,
+                bar_y + 7,
+                step - 6,
+                40,
+                7,
+                if selected {
+                    0x31596a
+                } else if hover {
+                    0x304960
+                } else {
+                    0x1d2d42
+                },
+                255,
+            );
             s.symbol(
                 left + (step - 20) / 2,
                 bar_y + 16,
                 id,
-                if selected { 0xa1e5bc } else { 0xd7eae2 },
+                if selected { 0xaaf3d3 } else { 0xe8f4fa },
             );
             if self.windows[id].open {
                 s.rect(
