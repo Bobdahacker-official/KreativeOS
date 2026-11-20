@@ -135,6 +135,53 @@ pub fn text_width(s: &str, scale: i32) -> i32 {
     s.bytes().map(|b| advance(b, scale)).sum()
 }
 impl Screen {
+    pub fn magnify(&mut self, mx: i32, my: i32) {
+        const WIDTH: usize = 120;
+        const HEIGHT: usize = 72;
+        if self.w < WIDTH * 2 + 20 || self.h < HEIGHT * 2 + 80 {
+            return;
+        }
+        let left = (mx - WIDTH as i32 / 2).clamp(0, (self.w - WIDTH) as i32) as usize;
+        let top = (my - HEIGHT as i32 / 2).clamp(0, (self.h - HEIGHT) as i32) as usize;
+        let x = if mx < self.w as i32 / 2 {
+            self.w - WIDTH * 2 - 12
+        } else {
+            12
+        };
+        let y = if my < self.h as i32 / 2 {
+            self.h - HEIGHT * 2 - 64
+        } else {
+            12
+        };
+        let mut sample = [0u32; WIDTH * HEIGHT];
+        unsafe {
+            for row in 0..HEIGHT {
+                core::ptr::copy_nonoverlapping(
+                    self.back.add((top + row) * self.w + left),
+                    sample.as_mut_ptr().add(row * WIDTH),
+                    WIDTH,
+                );
+            }
+            for row in 0..HEIGHT * 2 {
+                let target = self.back.add((y + row) * self.w + x);
+                for column in 0..WIDTH * 2 {
+                    target
+                        .add(column)
+                        .write(sample[(row / 2) * WIDTH + column / 2]);
+                }
+            }
+        }
+        let (x, y) = (x as i32, y as i32);
+        let (w, h) = ((WIDTH * 2) as i32, (HEIGHT * 2) as i32);
+        for (left, top, width, height) in [
+            (x - 2, y - 2, w + 4, 2),
+            (x - 2, y + h, w + 4, 2),
+            (x - 2, y, 2, h),
+            (x + w, y, 2, h),
+        ] {
+            self.rect(left, top, width, height, 0x75c092);
+        }
+    }
     fn theme_color(&self, color: u32) -> u32 {
         if self.theme == 0 {
             return color;

@@ -151,6 +151,7 @@ struct Desktop {
     search_row: usize,
     overview: bool,
     theme: u8,
+    magnifier: bool,
     workspace: usize,
     window_workspace: [usize; APP_COUNT],
     clipboard: alloc::vec::Vec<Text<2048>>,
@@ -161,6 +162,11 @@ struct Desktop {
     accent: u32,
     note: Text<2048>,
     filename: Text<32>,
+    draft_at: Option<u64>,
+    file_search: Text<48>,
+    file_cursor: usize,
+    file_images: bool,
+    file_preview: Option<(usize, crate::pictures::Picture)>,
     terminal: Text<4096>,
     command: Text<128>,
     url: Text<384>,
@@ -222,6 +228,7 @@ impl Desktop {
             search: None,
             search_row: 0,
             overview: false,
+            magnifier: false,
             theme: storage::find("Appearance.cfg")
                 .map(|index| unsafe { storage::FILES[index].data })
                 .and_then(|data| data.str().parse::<u8>().ok())
@@ -237,6 +244,11 @@ impl Desktop {
             accent: 0x1d6c58,
             note: Text::new(),
             filename: Text::new(),
+            draft_at: None,
+            file_search: Text::new(),
+            file_cursor: 0,
+            file_images: false,
+            file_preview: None,
             terminal: Text::new(),
             command: Text::new(),
             url: Text::new(),
@@ -327,6 +339,20 @@ impl Desktop {
         };
         d.open(0);
         d.open(IMAGES);
+        if let Some((name, note)) = storage::load_draft() {
+            let already_saved = storage::find(name.str()).is_some_and(|index| {
+                let saved = unsafe { &storage::FILES[index].data };
+                saved.bytes[..saved.len] == note.bytes[..note.len]
+            });
+            if !already_saved {
+                d.filename = name;
+                d.note = note;
+                d.open(1);
+                d.notice.set("Recovered an unsaved draft");
+                d.alert("Notes recovered an unsaved draft");
+                unsafe { hardware::log(b"KreativeOS: note draft recovered\r\n") };
+            }
+        }
         if let Some(package) = crate::packages::CATALOG
             .iter()
             .find_map(|package| package.open())
@@ -444,9 +470,62 @@ impl Desktop {
             self.load_local();
             self.open(3);
         } else {
+            self.checkpoint_draft(true);
             self.filename = name;
             self.note = file;
             self.open(1);
+        }
+    }
+    fn file_matches(&self, name: &str) -> bool {
+        self.file_search.len == 0
+            || name.as_bytes().windows(self.file_search.len).any(|part| {
+                part.eq_ignore_ascii_case(&self.file_search.bytes[..self.file_search.len])
+            })
+    }
+    fn file_items(&self) -> alloc::vec::Vec<usize> {
+        if self.file_images {
+            self.images
+                .files
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (name, _))| self.file_matches(name).then_some(i))
+                .collect()
+        } else {
+            unsafe {
+                storage::FILES
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, file)| {
+                        (file.used && self.file_matches(file.name.str())).then_some(i)
+                    })
+                    .collect()
+            }
+        }
+    }
+    fn file_viewport(&self) -> (usize, usize) {
+        let rows = ((self.windows[0].h - 135) / 36).max(1) as usize;
+        (self.file_cursor.saturating_sub(rows - 1), rows)
+    }
+    fn file_select(&mut self, row: usize) {
+        let Some(index) = self.file_items().get(row).copied() else {
+            return;
+        };
+        self.file_cursor = row;
+        self.file_preview = if self.file_images {
+            crate::pictures::decode(self.images.files[index].1).map(|image| (index, image))
+        } else {
+            None
+        };
+    }
+    fn file_open_selected(&mut self) {
+        let Some(index) = self.file_items().get(self.file_cursor).copied() else {
+            return;
+        };
+        if self.file_images {
+            self.images.select(index);
+            self.open(IMAGES);
+        } else {
+            self.open_file(unsafe { storage::FILES[index].name });
         }
     }
     fn archive(&mut self, name: &str, extract: bool) {
@@ -764,6 +843,9 @@ impl Desktop {
         self.notice.set(
             if storage::put(self.filename.str(), &self.note.bytes[..self.note.len]).is_ok() {
                 if storage::sync() {
+                    if self.draft_at.take().is_some() {
+                        storage::store_draft(&self.filename, &self.note);
+                    }
                     "Saved to disk"
                 } else {
                     "Saved in memory; data disk unavailable"
@@ -772,6 +854,17 @@ impl Desktop {
                 "Save failed"
             },
         )
+    }
+    fn checkpoint_draft(&mut self, now: bool) {
+        if self
+            .draft_at
+            .is_some_and(|at| now || hardware::millis() >= at)
+        {
+            self.draft_at = None;
+            if storage::store_draft(&self.filename, &self.note) {
+                unsafe { hardware::log(b"KreativeOS: note draft saved\r\n") };
+            }
+        }
     }
     fn package_install(&mut self, index: usize, open: bool) {
         let package = &crate::packages::CATALOG[index];
@@ -800,6 +893,10 @@ impl Desktop {
         }
     }
     fn key(&mut self, key: u8, n: &mut Network) {
+        if key == 0xab {
+            self.magnifier = !self.magnifier;
+            return;
+        }
         if key == 0xa2 || key == 0xaa {
             self.search = if self.search.is_some() && self.overview == (key == 0xaa) {
                 None
@@ -877,6 +974,22 @@ impl Desktop {
             return;
         }
         match self.focus {
+            0 => match key {
+                b'\n' => self.file_open_selected(),
+                0x80 => self.file_select(self.file_cursor.saturating_sub(1)),
+                0x81 => self.file_select(self.file_cursor + 1),
+                0x84 | 8 | 32..=126 => {
+                    match key {
+                        0x84 => self.file_search.clear(),
+                        8 => self.file_search.pop(),
+                        _ => self.file_search.push(key),
+                    }
+                    self.file_cursor = 0;
+                    self.file_preview = None;
+                    self.file_select(0);
+                }
+                _ => {}
+            },
             1 => match key {
                 0xa7 if self.note.len > 0 => {
                     self.clipboard.retain(|text| text.str() != self.note.str());
@@ -892,14 +1005,24 @@ impl Desktop {
                     if let Some(text) = self.clipboard.first() {
                         if self.note.len + text.len <= self.note.bytes.len() {
                             self.note.append(text.str());
+                            self.draft_at = Some(hardware::millis() + 750);
                             self.notice.set("Pasted from clipboard");
                         } else {
                             self.notice.set("Paste exceeds the document size limit");
                         }
                     }
                 }
-                8 => self.note.pop(),
-                b'\n' | 32..=126 => self.note.push(key),
+                8 | b'\n' | 32..=126 => {
+                    let size = self.note.len;
+                    if key == 8 {
+                        self.note.pop();
+                    } else {
+                        self.note.push(key);
+                    }
+                    if size != self.note.len {
+                        self.draft_at = Some(hardware::millis() + 750);
+                    }
+                }
                 _ => (),
             },
             2 => match key {
@@ -1032,12 +1155,17 @@ impl Desktop {
         self.terminal.push(b'\n');
         let (verb, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
         match verb{
- "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nziplist NAME | unzip NAME | run NAME\nsdk | install NAME.kapp | reboot\n"),
+ "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nziplist NAME | unzip NAME | run NAME\nsdk | install NAME.kapp | snapshot | reboot\n"),
  "ls"=>unsafe{for f in &storage::FILES{if f.used{let _=writeln!(self.terminal,"{}  {} bytes",f.name.str(),f.data.len);}}},
  "cat"=>{if let Some(i)=storage::find(arg){unsafe{self.terminal.append(storage::FILES[i].data.str())}}else{self.terminal.append("File not found")}},
  "touch"=>{match storage::put(arg,b""){Ok(())=>{self.terminal.append(if storage::sync(){"Created on disk"}else{"Created in memory"})},Err(e)=>self.terminal.append(e)}},
  "rm"=>{if storage::remove(arg){self.terminal.append(if storage::sync(){"Removed from disk"}else{"Removed from memory"})}else{self.terminal.append("File not found")}},
- "edit"=>{self.filename.set(arg);self.note.clear();if let Some(i)=storage::find(arg){unsafe{self.note=storage::FILES[i].data}}self.open(1)},
+ "edit"=>{if arg.is_empty() || arg.len() > 32 || !arg.is_ascii() || arg.contains(['/', '\\']) {
+   self.terminal.append("Enter a valid file name");
+ } else {
+   self.checkpoint_draft(true);
+   self.filename.set(arg);self.note.clear();if let Some(i)=storage::find(arg){unsafe{self.note=storage::FILES[i].data}}self.open(1)
+ }},
  "save"=>{self.save();self.terminal.append(self.notice.str())},"clear"=>self.terminal.clear(),
  "open"=>{if let Some(i)=NAMES.iter().position(|s|s.eq_ignore_ascii_case(arg)){self.open(i)}else{self.terminal.append("Unknown app")}},
  "browse"=>{self.url.set(arg);self.navigate(n);self.open(3)},
@@ -1064,7 +1192,20 @@ impl Desktop {
    } else { self.terminal.append("Script was not found"); }
  },
  "run"=>self.terminal.append("Nested scripts are unavailable"),
- "reboot"=>hardware::reboot(),""=>(),_=>self.terminal.append("Unknown command. Type help.")}
+ "snapshot" if arg.is_empty()=> {
+   if let Some(generation) = storage::previous_generation() {
+       let _ = write!(self.terminal, "Previous file snapshot: {generation}\nTo restore it and restart, type snapshot restore {generation}");
+   } else { self.terminal.append("No previous file snapshot available"); }
+ },
+ "snapshot" if allow_script => {
+   let generation = arg.strip_prefix("restore ").and_then(|text| text.parse::<u32>().ok());
+   if generation.is_some_and(storage::restore_previous) {
+       unsafe { hardware::log(b"KreativeOS: previous file snapshot restored\r\n") };
+       hardware::reboot();
+   }
+   self.terminal.append("Snapshot restore failed. Type snapshot to inspect the previous version.");
+ },
+ "reboot"=>{self.checkpoint_draft(true);hardware::reboot()}, ""=>(),_=>self.terminal.append("Unknown command. Type help.")}
     }
     fn pointer_hover(&self, w: i32, h: i32) -> Option<(usize, i32)> {
         if self.menu {
@@ -1091,6 +1232,11 @@ impl Desktop {
             let focused = self.windows[self.focus];
             if focused.open && !focused.min && focused.inside(self.mx, self.my) {
                 match self.focus {
+                    0 => self.file_select(if wheel > 0 {
+                        self.file_cursor.saturating_sub(1)
+                    } else {
+                        self.file_cursor + 1
+                    }),
                     3 if wheel > 0 => {
                         self.scroll = self.scroll.saturating_sub(wheel as usize * 100)
                     }
@@ -1279,18 +1425,24 @@ impl Desktop {
         match id {
             ORGANIZER => self.organizer.click(x, y),
             0 => {
-                if y >= 128 && x >= 154 {
-                    let row = ((y - 128) / 42) as usize;
-                    let found = unsafe {
-                        storage::FILES
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, f)| f.used)
-                            .nth(row)
-                            .map(|(i, _)| i)
-                    };
-                    if let Some(i) = found {
-                        self.open_file(unsafe { storage::FILES[i].name });
+                if x < 142 && (89..159).contains(&y) {
+                    self.file_images = y >= 124;
+                    self.file_cursor = 0;
+                    self.file_preview = None;
+                    self.file_select(0);
+                } else if x >= 154 && (48..79).contains(&y) {
+                    self.file_open_selected();
+                } else if x >= 154 && y >= 126 {
+                    let (first, count) = self.file_viewport();
+                    let row = ((y - 126) / 36) as usize;
+                    if row < count
+                        && x < if self.windows[0].w >= 480 {
+                            335
+                        } else {
+                            self.windows[0].w
+                        }
+                    {
+                        self.file_select(first + row);
                     }
                 }
             }
@@ -1299,6 +1451,7 @@ impl Desktop {
                     if x < 115 {
                         self.save()
                     } else if x < 220 {
+                        self.checkpoint_draft(true);
                         self.filename.set("Untitled.txt");
                         self.note.clear();
                         self.notice.clear()
@@ -1435,7 +1588,10 @@ impl Desktop {
                         "No writable data disk"
                     })
                 } else if y >= 300 && y < 350 {
+                    self.checkpoint_draft(true);
                     hardware::reboot()
+                } else if (372..406).contains(&y) && (24..304).contains(&x) {
+                    self.magnifier = !self.magnifier;
                 }
             }
             10 => {
@@ -1627,6 +1783,9 @@ impl Desktop {
             }
         }
         s.theme = 0;
+        if self.magnifier {
+            s.magnify(self.mx, self.my);
+        }
     }
     fn draw_tray(&self, s: &mut Screen, n: &Network, x: i32, y: i32) {
         s.shadow(x, y, 394, 292);
@@ -1796,41 +1955,87 @@ impl Desktop {
             0 => {
                 s.rect(x + 1, y + 39, 142, h - 54, 0xe7ede2);
                 s.text(x + 18, y + 59, "Locations", MUTED, 1);
-                for (row, label) in ["Documents"].iter().enumerate() {
-                    let yy = y + 92 + row as i32 * 36;
-                    if row == 0 {
+                for (row, label) in ["Documents", "Image library"].iter().enumerate() {
+                    let yy = y + 94 + row as i32 * 35;
+                    let selected = row == usize::from(self.file_images);
+                    if selected {
                         s.rounded(x + 9, yy - 5, 126, 30, 7, 0xc4dfcf, 255)
                     }
                     s.text(
                         x + 22,
                         yy,
                         label,
-                        if row == 0 { 0x32695f } else { MUTED },
+                        if selected { 0x32695f } else { MUTED },
                         1,
                     );
                 }
-                s.text(x + 164, y + 58, "Documents", INK, 3);
-                s.text(x + 165, y + 88, "Your local workspace", MUTED, 1);
-                let mut row = 0;
-                unsafe {
-                    for f in &storage::FILES {
-                        if f.used {
-                            let yy = y + 128 + row * 42;
-                            if yy + 30 > y + h {
-                                break;
+                button(s, x + 164, y + 48, 94, "Open", self.accent);
+                s.rounded(x + 163, y + 87, w - 180, 28, 5, 0xffffff, 255);
+                let search = if self.file_search.len == 0 {
+                    "Type to search files"
+                } else {
+                    self.file_search.str()
+                };
+                s.text(x + 172, y + 93, clip_label(search, w - 199, 1), MUTED, 1);
+                let items = self.file_items();
+                let (first, count) = self.file_viewport();
+                let split = w >= 480;
+                let list_width = if split { 166 } else { w - 180 };
+                for (row, &index) in items.iter().enumerate().skip(first).take(count) {
+                    let yy = y + 126 + (row - first) as i32 * 36;
+                    let name = if self.file_images {
+                        self.images.files[index].0
+                    } else {
+                        unsafe { storage::FILES[index].name.str() }
+                    };
+                    s.rounded(
+                        x + 163,
+                        yy,
+                        list_width,
+                        32,
+                        6,
+                        if row == self.file_cursor {
+                            0xc4dfcf
+                        } else {
+                            0xffffff
+                        },
+                        255,
+                    );
+                    s.text(
+                        x + 172,
+                        yy + 7,
+                        clip_label(name, list_width - 16, 1),
+                        INK,
+                        1,
+                    );
+                }
+                if split {
+                    if let Some(&index) = items.get(self.file_cursor) {
+                        if self.file_images {
+                            if let Some((_, image)) = self
+                                .file_preview
+                                .as_ref()
+                                .filter(|(selected, _)| *selected == index)
+                            {
+                                s.image(
+                                    x + 339,
+                                    y + 128,
+                                    w - 351,
+                                    (h - 143).min(176),
+                                    image,
+                                    false,
+                                );
                             }
-                            s.rounded(
-                                x + 163,
-                                yy - 2,
-                                w - 180,
-                                36,
-                                7,
-                                if row % 2 == 0 { 0xffffff } else { PANEL },
-                                255,
-                            );
-                            s.rounded(x + 173, yy + 3, 16, 21, 3, 0xdce5f8, 255);
-                            s.text(x + 200, yy + 1, f.name.str(), INK, 1);
-                            row += 1;
+                        } else {
+                            let data = unsafe { &storage::FILES[index].data };
+                            let preview = if data.len == 0 {
+                                "Empty file"
+                            } else if data.str().is_empty() {
+                                "Binary file"
+                            } else {
+                                data.str()
+                            };
+                            s.wrapped(x + 339, y + 128, w - 351, h - 143, preview, MUTED);
                         }
                     }
                 }
@@ -2208,6 +2413,18 @@ impl Desktop {
                 }
                 button(s, x + 24, y + 228, 280, "SAVE ALL FILES", SURFACE);
                 button(s, x + 24, y + 308, 280, "RESTART COMPUTER", SURFACE);
+                button(
+                    s,
+                    x + 24,
+                    y + 372,
+                    280,
+                    if self.magnifier {
+                        "Turn off magnifier"
+                    } else {
+                        "Magnify 2x (Ctrl+M)"
+                    },
+                    SURFACE,
+                );
                 s.text(x + 24, y + h - 40, self.notice.str(), self.accent, 1);
             }
             10 => {
@@ -2452,6 +2669,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
                             || desktop.painting;
                         desktop.mouse(x, y, buttons, wheel, &s, &mut network);
                         if interactive
+                            || (desktop.magnifier && (x != 0 || y != 0))
                             || previous != desktop.pointer_hover(s.w as i32, s.h as i32)
                             || desktop.menu
                         {
@@ -2461,6 +2679,7 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
                 }
             }
         }
+        desktop.checkpoint_draft(false);
         network.poll();
         if network.tls_pending {
             desktop.draw(&mut s, &network);
