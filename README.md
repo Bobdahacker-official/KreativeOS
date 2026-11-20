@@ -1,6 +1,6 @@
 # KreativeOS
 
-KreativeOS is an independent x86-64 operating system written from scratch in Rust. It boots through UEFI, exits firmware boot services, and runs its own graphical desktop, input drivers, disk storage and Ethernet stack. It does not use a Linux kernel, a host operating system, while using Rust libraries for TLS and certificate validation.
+KreativeOS is an independent x86-64 operating system written from scratch in Rust. It boots through UEFI, exits firmware boot services, and runs its own graphical desktop, input drivers, disk storage and Ethernet stack. The kernel runs directly on x86-64. The browser uses Rust libraries for TLS and certificate validation.
 
 ## Download
 
@@ -27,7 +27,7 @@ bash scripts/run.sh
 
 Set `OVMF_CODE` and `OVMF_VARS` if your firmware files use different paths. The supplied machine uses 256 MiB RAM, standard VGA, PS/2 input, RTL8139 Ethernet, a VirtIO boot disk (read by UEFI), and an IDE primary-master data disk. The operating system contains no Linux components; Linux, macOS or Windows can be used as a build host.
 
-GitHub Actions compiles the Rust binary, creates the disk image, boots it once and uploads the images, serial boot log and desktop screenshot as `KreativeOS-x86_64`.
+GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and checks HTTPS against local TLS servers. It uploads the images, serial logs and desktop screenshot as `KreativeOS-x86_64`.
 
 ## Desktop
 

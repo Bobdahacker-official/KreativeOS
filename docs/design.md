@@ -1,11 +1,7 @@
 # Desktop design
 
-The UI uses a deep navy workspace, mint highlights, compact taskbar and consistent app chrome. Every window has the same title, minimize and close positions. Color identifies focus; text remains the primary label. Files, settings and packages use familiar list and command patterns.
+The desktop uses a layered gradient wallpaper, a translucent system strip and dock, and softly shadowed windows. Original icons keep the main tools one click away, and hovering shows each label. Window controls live on the left, with title-bar dragging and a separate grid launcher.
 
-Research references:
+The renderer draws into a RAM framebuffer. It composites rounded surfaces, shadows and text with alpha blending. Open Sans is rasterized into a compressed grayscale glyph atlas at four sizes. Its license is in [assets/OpenSans-LICENSE.txt](../assets/OpenSans-LICENSE.txt).
 
-- Microsoft Windows design basics: https://learn.microsoft.com/en-us/windows/apps/design/basics/
-- Navigation principles: https://learn.microsoft.com/en-us/windows/apps/design/basics/navigation-basics
-- UEFI Graphics Output Protocol: https://uefi.org/specs/UEFI/2.10/12_Protocols_Console_Support.html
-
-These references informed grouping, navigation consistency and framebuffer discovery. The desktop renderer, font glyph data, window management and app code are original Rust implementations in this repository. No Windows UI code or assets are included.
+The palette, app marks and wallpaper are drawn by KreativeOS. Firmware graphics access follows the [UEFI Graphics Output Protocol](https://uefi.org/specs/UEFI/2.10/12_Protocols_Console_Support.html).

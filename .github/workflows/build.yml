@@ -16,7 +16,11 @@ jobs:
       - name: Compile and create boot disk
         run: bash scripts/build.sh
       - name: Install boot-check tools
-        run: sudo apt-get update -qq && sudo apt-get install -y qemu-system-x86 ovmf
+        timeout-minutes: 4
+        run: |
+          printf 'deb https://archive.ubuntu.com/ubuntu noble main universe\ndeb https://archive.ubuntu.com/ubuntu noble-updates main universe\n' > "$RUNNER_TEMP/kreative-apt.list"
+          sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/kreative-apt.list" -o Dir::Etc::sourceparts=- -o Acquire::https::Timeout=20 update -qq
+          sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/kreative-apt.list" -o Dir::Etc::sourceparts=- -o Acquire::https::Timeout=20 install -y --no-install-recommends qemu-system-x86 ovmf
       - name: Boot once and capture desktop
         run: python3 scripts/smoke.py
       - name: Verify HTTPS and certificate rejection
