@@ -1,7 +1,7 @@
 //! NVMe PCIe transport with polled admin and NVM queues.
 use crate::{
     hardware::{millis, pci, pci_write},
-    storage::{identity_mmio, marked_volume, Media, MARKER_LBA},
+    storage::{identity_mmio, Media},
     text::Text,
 };
 use core::{
@@ -18,8 +18,6 @@ const CC: usize = 0x14;
 const CSTS: usize = 0x1c;
 const READY: u32 = 1;
 const FATAL: u32 = 2;
-const SECTOR: usize = 512;
-const MIN_SECTORS: u64 = 16384;
 
 pub static mut DMA: usize = 0;
 
@@ -62,6 +60,7 @@ pub struct Disk {
     pub bdf: (u8, u8, u8),
     pub namespace: u32,
     pub sectors: u64,
+    pub sector_size: usize,
     pub model: Text<40>,
     pub media: Option<Media>,
 }
@@ -209,7 +208,7 @@ impl Disk {
         wait(self.ready_ms, || read(self.base, CSTS) & READY == 0)
     }
 
-    unsafe fn marked(&mut self, nsid: u32) -> bool {
+    unsafe fn probe_namespace(&mut self, nsid: u32) -> bool {
         let Some(identity) = self.identify(nsid, 0) else {
             return false;
         };
@@ -217,20 +216,20 @@ impl Disk {
         let format = identity[26];
         let index = usize::from((format & 15) | ((format & 0x60) >> 1));
         let lbaf = 128 + index * 4;
-        if sectors < MIN_SECTORS
+        if sectors < 24
             || index > usize::from(identity[25])
-            || identity[lbaf..lbaf + 3] != [0, 0, 9]
+            || identity[lbaf..lbaf + 2] != [0, 0]
+            || !matches!(identity[lbaf + 2], 9 | 12)
             || identity[29] & 7 != 0
         {
             return false;
         }
         self.namespace = nsid;
         self.sectors = sectors;
-        let mut label = [0; SECTOR];
-        let mut first = [0; SECTOR];
-        if self.transfer(MARKER_LBA, &mut label, false) && self.transfer(0, &mut first, false) {
-            self.media = marked_volume(&label, &first, self.sectors);
-        }
+        self.sector_size = 1 << identity[lbaf + 2];
+        self.media = crate::partition::probe(sectors, self.sector_size, |lba, bytes| {
+            self.transfer(lba, bytes, false)
+        });
         self.media.is_some()
     }
 
@@ -243,7 +242,7 @@ impl Disk {
                 return after == 0
                     && self.healthy
                     && (read(self.base, 8) >> 8 == 0x100)
-                    && self.marked(1);
+                    && self.probe_namespace(1);
             };
             let mut ids = [0u32; PAGE / 4];
             for (id, bytes) in ids.iter_mut().zip(list.chunks_exact(4)) {
@@ -253,7 +252,7 @@ impl Disk {
                 if id <= after || id == u32::MAX || !self.healthy {
                     return false;
                 }
-                if self.marked(id) {
+                if self.probe_namespace(id) {
                     return true;
                 }
                 after = id;
@@ -262,20 +261,22 @@ impl Disk {
         false
     }
 
-    pub unsafe fn transfer(&mut self, lba: u32, data: &mut [u8], store: bool) -> bool {
-        let end = u64::from(lba) + (data.len() / SECTOR) as u64;
+    pub unsafe fn transfer(&mut self, lba: u64, data: &mut [u8], store: bool) -> bool {
+        let Some(end) = lba.checked_add((data.len() / self.sector_size) as u64) else {
+            return false;
+        };
         if !self.healthy
             || data.is_empty()
-            || data.len() % SECTOR != 0
+            || data.len() % self.sector_size != 0
             || end > self.sectors
             || (store && !self.media.is_some_and(|media| media.writable(lba, end)))
         {
             return false;
         }
         let buffer = (DMA + DATA) as *mut u8;
-        let mut position = u64::from(lba);
+        let mut position = lba;
         for chunk in data.chunks_mut(self.max_bytes) {
-            let blocks = chunk.len() / SECTOR;
+            let blocks = chunk.len() / self.sector_size;
             let mut cmd = command(if store { 1 } else { 2 }, self.namespace);
             pointer(&mut cmd, 6, DMA + DATA);
             let pages = chunk.len().div_ceil(PAGE);
@@ -381,6 +382,7 @@ pub unsafe fn discover() -> Option<Disk> {
                     bdf: (bus, slot, function),
                     namespace: 0,
                     sectors: 0,
+                    sector_size: 512,
                     model: Text::new(),
                     media: None,
                 };

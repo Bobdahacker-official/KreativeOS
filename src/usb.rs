@@ -753,6 +753,7 @@ pub struct Disk {
     host: usize,
     slot: u8,
     pub sectors: u64,
+    pub sector_size: usize,
     pub media: Option<Media>,
     pub model: Text<40>,
     pub port: u8,
@@ -779,10 +780,12 @@ impl Disk {
             result
         }
     }
-    pub fn transfer(&self, lba: u32, bytes: &mut [u8], write: bool) -> bool {
-        let end = u64::from(lba) + (bytes.len() / 512) as u64;
+    pub fn transfer(&self, lba: u64, bytes: &mut [u8], write: bool) -> bool {
+        let Some(end) = lba.checked_add((bytes.len() / self.sector_size) as u64) else {
+            return false;
+        };
         if bytes.is_empty()
-            || bytes.len() % 512 != 0
+            || bytes.len() % self.sector_size != 0
             || end > self.sectors
             || (write && !self.media.is_some_and(|media| media.writable(lba, end)))
         {
@@ -790,15 +793,23 @@ impl Disk {
         }
         let mut position = lba;
         for chunk in bytes.chunks_mut(3 * PAGE) {
-            let sectors = (chunk.len() / 512) as u16;
-            let mut cmd = [0u8; 10];
-            cmd[0] = if write { 0x2a } else { 0x28 };
-            cmd[2..6].copy_from_slice(&position.to_be_bytes());
-            cmd[7..9].copy_from_slice(&sectors.to_be_bytes());
-            if !self.run(&cmd, chunk, !write) {
+            let sectors = (chunk.len() / self.sector_size) as u32;
+            let mut cmd = [0u8; 16];
+            let length = if position + u64::from(sectors) <= (1 << 32) {
+                cmd[0] = if write { 0x2a } else { 0x28 };
+                cmd[2..6].copy_from_slice(&(position as u32).to_be_bytes());
+                cmd[7..9].copy_from_slice(&(sectors as u16).to_be_bytes());
+                10
+            } else {
+                cmd[0] = if write { 0x8a } else { 0x88 };
+                cmd[2..10].copy_from_slice(&position.to_be_bytes());
+                cmd[10..14].copy_from_slice(&sectors.to_be_bytes());
+                16
+            };
+            if !self.run(&cmd[..length], chunk, !write) {
                 return false;
             }
-            position += u32::from(sectors);
+            position += u64::from(sectors);
         }
         !write || self.run(&[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0], &mut [], false)
     }
@@ -822,6 +833,7 @@ pub fn discover() -> Option<Disk> {
             host,
             slot,
             sectors: 0,
+            sector_size: 512,
             media: None,
             model: Text::new(),
             port,
@@ -839,21 +851,29 @@ pub fn discover() -> Option<Disk> {
         if !disk.run(&[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], &mut cap, true) {
             continue;
         }
-        let block = u32::from_be_bytes(cap[4..].try_into().unwrap());
-        let last = u32::from_be_bytes(cap[..4].try_into().unwrap());
-        if block != 512 || last == u32::MAX {
+        let mut block = u32::from_be_bytes(cap[4..].try_into().unwrap());
+        let mut last = u64::from(u32::from_be_bytes(cap[..4].try_into().unwrap()));
+        if last == u64::from(u32::MAX) {
+            let mut cap16 = [0; 32];
+            let mut cmd = [0; 16];
+            cmd[..2].copy_from_slice(&[0x9e, 0x10]);
+            cmd[13] = 32;
+            if !disk.run(&cmd, &mut cap16, true) || cap16[12] & 1 != 0 {
+                continue;
+            }
+            last = u64::from_be_bytes(cap16[..8].try_into().unwrap());
+            block = u32::from_be_bytes(cap16[8..12].try_into().unwrap());
+        }
+        if !matches!(block, 512 | 4096) || last == u64::MAX {
             continue;
         }
-        disk.sectors = u64::from(last) + 1;
-        let mut label = [0; 512];
-        let mut first = [0; 512];
-        if disk.transfer(storage::MARKER_LBA, &mut label, false)
-            && disk.transfer(0, &mut first, false)
-        {
-            disk.media = storage::marked_volume(&label, &first, disk.sectors);
-            if matches!(disk.media, Some(Media::Exfat(_))) {
-                return Some(disk);
-            }
+        disk.sectors = last + 1;
+        disk.sector_size = block as usize;
+        disk.media = crate::partition::probe(disk.sectors, disk.sector_size, |lba, bytes| {
+            disk.transfer(lba, bytes, false)
+        });
+        if matches!(disk.media, Some(Media::Exfat { .. })) {
+            return Some(disk);
         }
     }
     None

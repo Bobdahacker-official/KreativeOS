@@ -105,11 +105,17 @@ The gallery reads up to 36 imported images from packs totaling 6 MiB. Each image
 
 ## Files and packages
 
-New volumes use standard exFAT. KreativeOS loads up to 24 supported root files, with ASCII names up to 32 bytes and up to 2 KiB per file. The kernel mounts one prepared data volume, looking for USB first, then NVMe, AHCI SATA, and finally IDE. Files in a new image are normal exFAT directory entries. Existing KFS data images can still be attached explicitly using `KREATIVE_DATA_IMAGE`.
+New volumes use exFAT 1.00. KreativeOS mounts one valid data volume, looking for USB first, then NVMe, AHCI SATA, and IDE. Ordinary exFAT volumes mount read-only until you confirm writes in first-boot setup or sign in to an existing account on that volume. Previously prepared `KOSDAT` data volumes remain writable by default. KreativeOS manages up to 24 root files, with ASCII names up to 32 bytes and up to 2 KiB per file. Existing KFS images remain available through `KREATIVE_DATA_IMAGE`.
 
 ### SSDs, HDDs and data migration
 
-Use `KreativeOS-exfat.img` with a dedicated SATA SSD, HDD or NVMe SSD. The combined USB image is available when boot and data should live on one removable drive. The data transports use 512-byte logical sectors, including drives that expose 512-byte sectors over 4 KiB physical sectors. The driver checks the KreativeOS marker and the partition geometry and confines filesystem writes to the data partition.
+Use `KreativeOS-exfat.img` as a dedicated virtual data disk. The combined USB image keeps EFI boot and data in separate partitions. AHCI, NVMe and USB BOT support 512-byte and 4 KiB logical sectors. The kernel verifies GPT checksums and partition bounds, also recognizes primary MBR partitions and whole-device exFAT, and confines filesystem writes to the selected volume. The older IDE path uses 512-byte sectors.
+
+```sh
+python scripts/exfat_image.py build/data-gpt-4kn.img --partition gpt --sector-size 4096
+```
+
+Attach a 4Kn image to a virtual disk configured with 4,096-byte logical sectors. Use the portable exFAT path for file exchange. The guest currently manages small root files and uses host tools for directory trees, large files and dirty-volume recovery.
 
 To copy legacy files and accounts to a new SATA image while keeping the original image:
 
@@ -152,12 +158,14 @@ browse file:Demo.html
 
 ### Accounts and native programs
 
-1. On a fresh data disk, run `accounts` in Terminal to set the administrator password. Once configured, KreativeOS starts at sign-in.
-2. Run `accounts add` as `admin` to create a standard account. Run `accounts` to list accounts and available administration commands.
+1. At first boot, create the local administrator on a writable data disk. Choose a lowercase username and a password of at least 12 characters. Subsequent boots open the sign-in screen.
+2. Select **Create an account** at sign-in to register a standard user. Any signed-in user can change their password or sign out under **Settings → Accounts**. The administrator can also add users and manage them from Terminal with `accounts`.
 3. Name a program `alice.hello.kr3` to assign it to `alice`. Use `dev import` to install the program. The administrator can also try it with `exec alice.hello.kr3` from Terminal.
-4. Run `lock` and sign in as `alice`. In the user console, run `ls` and then `exec hello.kr3`. Use `passwd` to change the account password or `logout` to return to sign-in.
+4. Sign out and sign in as `alice`. Open Terminal from the desktop, run `ls`, then run `exec hello.kr3`.
 
-The administrator has the desktop and file management tools. Standard accounts enter a console whose executable lookup is scoped to the signed-in username. The KR3 runner maps executable code and a writable, non-executable stack into CPU ring 3. An invalid memory access or a CPU exception stops the program. The local APIC timer limits each run to roughly 250 ms.
+New passwords use PBKDF2-HMAC-SHA-256 with 600,000 iterations and a fresh 128-bit hardware-generated salt. Existing local account files remain readable.
+
+Both account types open the desktop. Standard accounts have separate file and application settings, and Terminal runs their own KR3 executables. Administration, system networking changes and restart require the administrator. The KR3 runner maps executable code and a writable, non-executable stack into CPU ring 3. An invalid memory access or a CPU exception stops the program. The local APIC timer limits each run to roughly 250 ms.
 
 Build the example with NASM:
 

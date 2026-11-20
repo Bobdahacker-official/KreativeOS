@@ -618,7 +618,11 @@ impl Network {
         self.status = s;
         self.changed = true
     }
-    pub fn browse(&mut self, url: &str) {
+    pub fn clear_browser_session(&mut self) {
+        self.state = 0;
+        self.host.clear();
+        self.path.clear();
+        self.dns_name.clear();
         self.body.clear();
         self.response = None;
         self.verified = false;
@@ -629,6 +633,9 @@ impl Network {
         self.raw_waiting = false;
         self.changed = true;
         self.last_len = 0;
+    }
+    pub fn browse(&mut self, url: &str) {
+        self.clear_browser_session();
         if !self.online() && !self.wifi.joined {
             self.fail("Connect Ethernet or Wi-Fi");
             return;

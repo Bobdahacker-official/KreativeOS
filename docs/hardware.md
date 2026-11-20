@@ -10,10 +10,10 @@ The driver checks DMA and 48-bit LBA support, logical sector size and disk capac
 
 | Supported path | Requirements |
 |---|---|
-| Physical SATA disk or SSD | Standard AHCI controller, directly attached SATA drive, 512-byte logical sectors, 48-bit LBA and a marked exFAT or legacy image |
+| Physical SATA disk or SSD | Standard AHCI controller, directly attached SATA drive, 512-byte or 4 KiB logical sectors, 48-bit LBA and a dedicated exFAT data volume labeled `KOSDAT` |
 | QEMU SATA profile | ICH9 AHCI with a dedicated data image. The guest negotiates and executes its own DMA commands. [QEMU AHCI implementation](https://github.com/qemu/qemu/blob/master/hw/ide/ahci.c) |
-| Physical PCIe NVMe SSD | Standard NVMe PCIe controller, a 512-byte namespace without metadata or protection information, and marked data media |
-| USB flash or external storage | xHCI root port, USB mass storage BOT, LUN 0 and 512-byte sectors on a marked exFAT disk. [USB specifics and ASRock profile](a520m-hvs.md) |
+| Physical PCIe NVMe SSD | Standard NVMe PCIe controller, a 512-byte or 4 KiB namespace without metadata or protection information, and an opted-in exFAT data volume |
+| USB flash or external storage | xHCI root port, USB mass storage BOT, LUN 0 and 512-byte or 4 KiB logical sectors. [USB specifics and ASRock profile](a520m-hvs.md) |
 | QEMU NVMe profile | PCIe NVMe controller with a marked data namespace. [QEMU NVMe documentation](https://www.qemu.org/docs/master/system/devices/nvme.html) |
 | Legacy IDE | Existing primary-master KFS data images remain usable with the IDE launch profile. |
 

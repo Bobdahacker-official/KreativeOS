@@ -24,6 +24,7 @@ mod net;
 mod nvme;
 mod organizer;
 mod packages;
+mod partition;
 mod pictures;
 mod ring3;
 mod secure;

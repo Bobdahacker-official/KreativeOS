@@ -121,6 +121,11 @@ pub fn mix(a: u32, b: u32, t: u32) -> u32 {
         | ((((a >> 8) & 255) * u + ((b >> 8) & 255) * t) / 255 << 8)
         | (((a & 255) * u + (b & 255) * t) / 255)
 }
+fn corner_coverage(dx: i32, dy: i32, radius: i32) -> u32 {
+    // Measure at the pixel center in half-pixel units.
+    let (x, y, r) = (2 * dx - 1, 2 * dy - 1, 2 * radius);
+    (128 + (r * r - x * x - y * y) * 255 / (4 * r)).clamp(0, 255) as u32
+}
 fn font_index(scale: i32) -> usize {
     match scale {
         0 | 1 => 0,
@@ -292,7 +297,7 @@ impl Screen {
                 for xx in 0..r {
                     let dx = r - xx;
                     let dy = r - yy;
-                    let a = ((r * r - dx * dx - dy * dy) * 255 / (2 * r)).clamp(0, 255) as u32;
+                    let a = corner_coverage(dx, dy, r);
                     self.blend(x + xx, y + yy, c, a);
                     self.blend(x + w - 1 - xx, y + yy, c, a);
                     self.blend(x + xx, y + h - 1 - yy, c, a);
@@ -317,20 +322,33 @@ impl Screen {
                 } else {
                     0
                 };
-                let d = dx * dx + dy * dy;
                 let cov = if dx == 0 || dy == 0 {
                     255
                 } else {
-                    ((r * r - d) * 255 / (2 * r)).clamp(0, 255)
+                    corner_coverage(dx, dy, r)
                 };
                 if cov > 0 {
-                    self.blend(x + xx, y + yy, c, alpha * cov as u32 / 255)
+                    self.blend(x + xx, y + yy, c, alpha * cov / 255)
                 }
             }
         }
     }
     pub fn round(&mut self, x: i32, y: i32, w: i32, h: i32, c: u32) {
         self.rounded(x, y, w, h, 10, c, 255)
+    }
+    pub fn input_box(&mut self, x: i32, y: i32, w: i32, h: i32, focused: bool, accent: u32) {
+        let border = if focused { accent } else { 0xcbd5df };
+        let inset = if focused { 2 } else { 1 };
+        self.rounded(x, y, w, h, 6, border, 255);
+        self.rounded(
+            x + inset,
+            y + inset,
+            w - 2 * inset,
+            h - 2 * inset,
+            5,
+            0xffffff,
+            255,
+        );
     }
     pub fn shadow(&mut self, x: i32, y: i32, w: i32, h: i32) {
         for spread in 1..=10 {
@@ -359,13 +377,15 @@ impl Screen {
                 continue;
             }
             let ch = if (32..127).contains(&b) { b } else { b'?' };
-            let off = (font_index(scale) * 95 + (ch - 32) as usize) * 1921;
+            let glyph = font_index(scale) * 95 + (ch - 32) as usize;
+            let off = glyph * 1921;
             unsafe {
-                for row in 0..48 {
-                    for col in 0..40 {
-                        let a = FONT[off + 1 + row * 40 + col];
+                let (left, top, right, bottom) = INK_BOUNDS[glyph];
+                for row in top..bottom {
+                    for col in left..right {
+                        let a = FONT[off + 1 + (row * 40 + col) as usize];
                         if a != 0 {
-                            self.blend(xx + col as i32, yy + row as i32, c, a as u32)
+                            self.blend(xx + col, yy + row, c, a as u32)
                         }
                     }
                 }
@@ -374,30 +394,37 @@ impl Screen {
         }
     }
     pub fn wrapped(&mut self, x: i32, y: i32, w: i32, h: i32, s: &str, c: u32) {
+        self.wrap(x, y, w, h, s, c, 2);
+    }
+    pub fn wrapped_small(&mut self, x: i32, y: i32, w: i32, h: i32, s: &str, c: u32) {
+        self.wrap(x, y, w, h, s, c, 1);
+    }
+    fn wrap(&mut self, x: i32, y: i32, w: i32, h: i32, s: &str, c: u32, scale: i32) {
+        let line = if scale == 1 { 18 } else { 23 };
         let mut xx = x;
         let mut yy = y;
         for word in s.split_inclusive(|c: char| c == ' ' || c == '\n') {
-            let size = text_width(word.trim_end_matches('\n'), 2);
+            let size = text_width(word.trim_end_matches('\n'), scale);
             if xx != x && xx + size > x + w {
                 xx = x;
-                yy += 23
+                yy += line
             }
             for b in word.bytes() {
                 if b == b'\n' {
                     xx = x;
-                    yy += 23;
+                    yy += line;
                     continue;
                 }
-                let adv = advance(b, 2);
+                let adv = advance(b, scale);
                 if xx + adv > x + w {
                     xx = x;
-                    yy += 23
+                    yy += line
                 }
-                if yy + 21 > y + h {
+                if yy + line > y + h {
                     return;
                 }
                 let a = [b];
-                self.text(xx, yy, core::str::from_utf8(&a).unwrap_or("?"), c, 2);
+                self.text(xx, yy, core::str::from_utf8(&a).unwrap_or("?"), c, scale);
                 xx += adv;
             }
         }
@@ -442,52 +469,40 @@ impl Screen {
                 WALLPAPER_KEY = key;
                 WALLPAPER.resize(self.w * self.h, 0);
                 let [base, sky, core, rim] = DESK_PALETTES[key.2];
-                // Sample the smooth wallpaper on a grid so the software float
-                // operations don't stall input. Interpolate to native resolution.
-                const STEP: usize = 4;
-                let columns = self.w.div_ceil(STEP) + 1;
-                let rows = self.h.div_ceil(STEP) + 1;
-                let mut samples = alloc::vec![0; columns * rows];
-                let ratio = self.w as f32 / self.h as f32;
-                for y in 0..rows {
-                    let fy = (y * STEP) as f32 / self.h as f32;
-                    for x in 0..columns {
-                        let fx = (x * STEP) as f32 / self.w as f32;
-                        let light = (0.28 + 0.62 * (1.0 - fy) + 0.08 * fx).clamp(0.0, 1.0);
-                        let mut c = mix(base, sky, (255.0 * light) as u32);
-                        for (cx, cy, radius) in
-                            [(0.13, 0.29, 0.16), (0.91, -0.05, 0.50), (0.30, 1.02, 0.57)]
-                        {
-                            let dx = (fx - cx) * ratio / radius;
-                            let dy = (fy - cy) / radius;
-                            let distance = dx * dx + dy * dy;
-                            let soft_edge = ((1.01 - distance) * 105.0).clamp(0.0, 1.0);
-                            if soft_edge > 0.0 {
-                                let gloss = (distance * distance * (0.66 - dy * 0.26 - dx * 0.20))
-                                    .clamp(0.0, 1.0);
-                                let body = mix(
-                                    core,
-                                    sky,
-                                    ((0.34 + dx * 0.30 + dy * 0.16).clamp(0.04, 0.86) * 255.0)
-                                        as u32,
-                                );
-                                let surface = mix(body, rim, (255.0 * gloss) as u32);
-                                c = mix(c, surface, (248.0 * soft_edge) as u32);
+                // Derive each native pixel from the same fixed-point circles.
+                // Cache the horizontal terms so changing a theme is cheap.
+                const ONE: i32 = 1024;
+                let (width, height) = (self.w as i32, self.h as i32);
+                let circles = [(13, 29, 16), (91, -5, 50), (30, 102, 57)].map(|(x, y, r)| {
+                    (width * x / 100, height * y / 100, (height * r / 100).max(1))
+                });
+                let columns: Vec<_> = (0..width)
+                    .map(|x| {
+                        let dx = circles.map(|(cx, _, radius)| (x - cx) * ONE / radius);
+                        let square = dx.map(|value| value.saturating_mul(value));
+                        (x * 20 / width, dx, square)
+                    })
+                    .collect();
+                for (row, pixels) in WALLPAPER.chunks_exact_mut(self.w).enumerate() {
+                    let dy = circles.map(|(_, cy, radius)| (row as i32 - cy) * ONE / radius);
+                    let dy2 = dy.map(|value| value.saturating_mul(value));
+                    let light = 71 + (height - row as i32) * 158 / height;
+                    for (pixel, &(light_x, dx, dx2)) in pixels.iter_mut().zip(&columns) {
+                        let mut color = mix(base, sky, (light + light_x) as u32);
+                        for index in 0..circles.len() {
+                            let distance = dx2[index].saturating_add(dy2[index]) / ONE;
+                            if distance >= ONE + 22 {
+                                continue;
                             }
+                            let edge = ((ONE + 22 - distance) * 255 / 30).min(248);
+                            let body =
+                                (87 + (dx[index] * 77 + dy[index] * 41) / ONE).clamp(10, 219);
+                            let gloss = (169 - (dy[index] * 66 + dx[index] * 51) / ONE).max(0);
+                            let reflection = (distance * distance / ONE * gloss / ONE).min(255);
+                            let surface = mix(mix(core, sky, body as u32), rim, reflection as u32);
+                            color = mix(color, surface, edge as u32);
                         }
-                        samples[y * columns + x] = c;
-                    }
-                }
-                for (y, row) in WALLPAPER.chunks_exact_mut(self.w).enumerate() {
-                    let top = (y / STEP) * columns;
-                    let bottom = top + columns;
-                    let weight_y = (y % STEP * 255 / STEP) as u32;
-                    for (x, pixel) in row.iter_mut().enumerate() {
-                        let col = x / STEP;
-                        let weight_x = (x % STEP * 255 / STEP) as u32;
-                        let above = mix(samples[top + col], samples[top + col + 1], weight_x);
-                        let below = mix(samples[bottom + col], samples[bottom + col + 1], weight_x);
-                        *pixel = mix(above, below, weight_y);
+                        *pixel = color;
                     }
                 }
             }
@@ -640,9 +655,16 @@ impl Screen {
         }
     }
     pub fn present(&mut self) {
+        self.present_region(0, 0, self.w as i32, self.h as i32);
+    }
+    pub fn present_region(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        let left = x.clamp(0, self.w as i32) as usize;
+        let right = (x + w).clamp(0, self.w as i32) as usize;
+        let top = y.clamp(0, self.h as i32) as usize;
+        let bottom = (y + h).clamp(0, self.h as i32) as usize;
         unsafe {
-            for y in 0..self.h {
-                for x in 0..self.w {
+            for y in top..bottom {
+                for x in left..right {
                     let c = *self.back.add(y * self.w + x);
                     let c = if self.rgb {
                         (c & 0xff00) | ((c & 255) << 16) | ((c >> 16) & 255)

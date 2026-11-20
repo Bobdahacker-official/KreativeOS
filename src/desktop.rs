@@ -7,10 +7,12 @@ use crate::{
     text::Text,
 };
 use core::fmt::Write;
-pub(crate) const INK: u32 = 0x20363a;
-pub(crate) const MUTED: u32 = 0x566a69;
-const PANEL: u32 = 0xf0f5fa;
-pub(crate) const SURFACE: u32 = 0xe2ecf6;
+pub(crate) const INK: u32 = 0x202e3d;
+pub(crate) const MUTED: u32 = 0x526273;
+const PANEL: u32 = 0xf7f9fc;
+pub(crate) const SURFACE: u32 = 0xe7edf4;
+const DIVIDER: u32 = 0xdbe3ec;
+const SELECTED: u32 = 0xe0edfa;
 const NAMES: [&str; 15] = [
     "Files",
     "Notes",
@@ -45,21 +47,21 @@ const PRESETS: [(&str, u8, u32, u8); 4] = [
     ("Contrast", 2, 0x254256, 3),
 ];
 
-#[derive(Clone, Copy)]
-struct Box2 {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Box2 {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) w: i32,
+    pub(crate) h: i32,
 }
 impl Box2 {
-    fn at(x: i32, y: i32, w: i32, h: i32) -> Self {
+    pub(crate) fn at(x: i32, y: i32, w: i32, h: i32) -> Self {
         Self { x, y, w, h }
     }
-    fn has(self, x: i32, y: i32) -> bool {
+    pub(crate) fn has(self, x: i32, y: i32) -> bool {
         (self.x..self.x + self.w).contains(&x) && (self.y..self.y + self.h).contains(&y)
     }
-    fn glass(self, s: &mut Screen, radius: i32, fill: u32, alpha: u32) {
+    pub(crate) fn glass(self, s: &mut Screen, radius: i32, fill: u32, alpha: u32) {
         s.rounded(self.x, self.y, self.w, self.h, radius, fill, alpha);
     }
 }
@@ -136,7 +138,7 @@ impl SettingsLayout {
         if self.wide {
             Box2::at(15, 94 + index as i32 * 42, 139, 36)
         } else {
-            let step = self.width / 3;
+            let step = self.width / 4;
             Box2::at(18 + index as i32 * step, 49, step - 4, 34)
         }
     }
@@ -154,11 +156,22 @@ impl SettingsLayout {
     fn action(&self, index: usize) -> Box2 {
         Box2::at(
             self.x,
-            self.y + if index == 0 { 155 } else { 199 },
+            self.y + 155 + index as i32 * 44,
             self.width.min(240),
             34,
         )
     }
+}
+
+fn calculator_key(width: i32, height: i32, index: usize) -> Box2 {
+    let column_width = (width - 48) / 4;
+    let row_height = ((height - 161) / 4).clamp(16, 60);
+    Box2::at(
+        24 + (index % 4) as i32 * column_width,
+        141 + (index / 4) as i32 * row_height,
+        column_width - 6,
+        row_height - 6,
+    )
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WebJob {
@@ -355,7 +368,8 @@ struct Desktop {
     hardware_center: crate::hardware_center::Center,
 }
 impl Desktop {
-    fn new(w: usize, h: usize) -> Self {
+    #[inline(never)]
+    fn new(w: usize, h: usize, users: crate::users::Session) -> Self {
         let mut appearance = (0, 0, false, 0);
         if let Some(index) = storage::find("Appearance.cfg") {
             let data = unsafe { storage::FILES[index].data };
@@ -448,7 +462,7 @@ impl Desktop {
             winner: 0,
             images: Catalog::new(),
             organizer: crate::organizer::Organizer::new(),
-            users: crate::users::Session::new(),
+            users,
             hardware_center: crate::hardware_center::Center::new(),
             ethernet: crate::ethernet::Editor::new(),
             ethernet_tab: true,
@@ -459,7 +473,11 @@ impl Desktop {
             d.windows[i].x = 45 + (i as i32 % 4) * 18;
             d.windows[i].y = 40 + (i as i32 % 3) * 16
         }
-        d.filename.set("Welcome.txt");
+        d.filename.set(if storage::find("Welcome.txt").is_some() {
+            "Welcome.txt"
+        } else {
+            "Untitled.txt"
+        });
         if let Some(i) = storage::find("Welcome.txt") {
             unsafe { d.note = storage::FILES[i].data }
         }
@@ -567,7 +585,7 @@ impl Desktop {
                     || (index == ORGANIZER && matches("calendar contacts"))
                     || (index == HARDWARE_CENTER
                         && matches("pci sata disk devices drivers diagnostics"))
-                    || (index == 9 && matches("display input appearance settings power")))
+                    || (index == 9 && matches("display input appearance settings power accounts")))
             {
                 let mut text = Text::new();
                 if self.overview {
@@ -587,12 +605,15 @@ impl Desktop {
             return rows;
         }
         for file in unsafe { &storage::FILES } {
-            if file.used
-                && (matches(file.name.str()) || (query.len > 0 && matches(file.data.str())))
-            {
+            let Some(name) = storage::visible_name(file.name.str()).filter(|_| file.used) else {
+                continue;
+            };
+            if matches(name) || (query.len > 0 && matches(file.data.str())) {
                 let mut text = Text::new();
-                let _ = write!(text, "File   {}", file.name.str());
-                rows.push((text, SearchTarget::File(file.name)));
+                let mut local_name = Text::new();
+                local_name.set(name);
+                let _ = write!(text, "File   {name}");
+                rows.push((text, SearchTarget::File(local_name)));
             }
         }
         for url in &self.history {
@@ -659,7 +680,10 @@ impl Desktop {
                     .iter()
                     .enumerate()
                     .filter_map(|(i, file)| {
-                        (file.used && self.file_matches(file.name.str())).then_some(i)
+                        (file.used
+                            && storage::visible_name(file.name.str())
+                                .is_some_and(|name| self.file_matches(name)))
+                        .then_some(i)
                     })
                     .collect()
             }
@@ -688,7 +712,11 @@ impl Desktop {
             self.images.select(index);
             self.open(IMAGES);
         } else {
-            self.open_file(unsafe { storage::FILES[index].name });
+            if let Some(name) = storage::visible_name(unsafe { storage::FILES[index].name.str() }) {
+                let mut local_name = Text::new();
+                local_name.set(name);
+                self.open_file(local_name);
+            }
         }
     }
     fn archive(&mut self, name: &str, extract: bool) {
@@ -1030,7 +1058,9 @@ impl Desktop {
         }
     }
     fn package_install(&mut self, index: usize, open: bool) {
-        let package = &crate::packages::CATALOG[index];
+        let Some(package) = crate::packages::CATALOG.get(index) else {
+            return;
+        };
         let result = if open && package.open().is_some() {
             Ok(true)
         } else {
@@ -1253,6 +1283,7 @@ impl Desktop {
                     self.snake.next = v
                 }
             }
+            8 if !self.users.administrator() => (),
             8 if self.ethernet_tab => self.ethernet.key(key, n),
             8 if self.scanning_results => match key {
                 8 => self.scanning_results = false,
@@ -1372,7 +1403,7 @@ impl Desktop {
     }
     fn settings_click(&mut self, x: i32, y: i32, w: i32, h: i32) {
         let layout = SettingsLayout::new(w);
-        for page in 0..3 {
+        for page in 0..4 {
             if layout.nav(page).has(x, y) {
                 self.settings_page = page;
                 self.restart_armed = false;
@@ -1415,7 +1446,10 @@ impl Desktop {
                     "No writable data disk"
                 };
             }
-            1 if layout.action(1).has(x, y) && layout.action(1).y + 34 < h => {
+            1 if self.users.administrator()
+                && layout.action(1).has(x, y)
+                && layout.action(1).y + 34 < h =>
+            {
                 if self.restart_armed {
                     self.checkpoint_draft(true);
                     hardware::reboot();
@@ -1427,6 +1461,13 @@ impl Desktop {
                 self.magnifier = !self.magnifier;
                 self.save_appearance();
             }
+            3 if layout.action(0).has(x, y) => self.users.add(),
+            3 if layout.action(1).has(x, y) => self.users.change_password(),
+            3 if layout.action(2).has(x, y) => {
+                self.checkpoint_draft(true);
+                crate::audio::stop();
+                self.users.lock();
+            }
             _ => {}
         }
     }
@@ -1436,7 +1477,10 @@ impl Desktop {
             s.rect(x + 1, y + 38, 158, h - 39, 0xe4edf7);
             s.text(x + 24, y + 62, "Preferences", MUTED, 1);
         }
-        for (index, name) in ["Appearance", "System", "Accessibility"].iter().enumerate() {
+        for (index, name) in ["Appearance", "System", "Accessibility", "Accounts"]
+            .iter()
+            .enumerate()
+        {
             let nav = layout.nav(index);
             let active = index == self.settings_page;
             s.rounded(
@@ -1555,6 +1599,9 @@ impl Desktop {
                 .iter()
                 .enumerate()
                 {
+                    if index == 1 && !self.users.administrator() {
+                        continue;
+                    }
                     let r = layout.action(index);
                     if r.y + r.h < h {
                         button(
@@ -1572,7 +1619,7 @@ impl Desktop {
                     }
                 }
             }
-            _ => {
+            2 => {
                 s.text(left, top, "Accessibility", INK, 2);
                 s.wrapped(left, top + 45, layout.width, 85, "Magnify the area around the pointer. Press Ctrl+M to toggle while using other apps.", MUTED);
                 let r = layout.action(0);
@@ -1588,6 +1635,32 @@ impl Desktop {
                     },
                     if self.magnifier { self.accent } else { SURFACE },
                 );
+            }
+            _ => {
+                s.text(left, top, "Accounts", INK, 2);
+                s.text(left, top + 44, self.users.name(), INK, 2);
+                let admin = self.users.administrator();
+                s.text(
+                    left,
+                    top + 73,
+                    if admin {
+                        "Administrator"
+                    } else {
+                        "Standard account"
+                    },
+                    MUTED,
+                    1,
+                );
+                for (index, title) in ["Add account", "Change password", "Sign out"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    if index == 0 && !admin {
+                        continue;
+                    }
+                    let r = layout.action(index);
+                    button(s, x + r.x, y + r.y, r.w, title, SURFACE);
+                }
             }
         }
         s.text(
@@ -1620,9 +1693,18 @@ impl Desktop {
         self.terminal.append(line);
         self.terminal.push(b'\n');
         let (verb, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
+        if !self.users.administrator()
+            && matches!(
+                verb,
+                "accounts" | "dev" | "snapshot" | "reboot" | "dhcp" | "static"
+            )
+        {
+            self.terminal.append("Administrator access required");
+            return;
+        }
         match verb{
  "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nziplist NAME | unzip NAME | run NAME\ndev list | dev import | exec NAME.kr3\naccounts | lock | sdk | install NAME.kapp | snapshot | reboot\n"),
- "ls"=>unsafe{for f in &storage::FILES{if f.used{let _=writeln!(self.terminal,"{}  {} bytes",f.name.str(),f.data.len);}}},
+ "ls"=>unsafe{for f in &storage::FILES{if let Some(name)=storage::visible_name(f.name.str()).filter(|_| f.used){let _=writeln!(self.terminal,"{name}  {} bytes",f.data.len);}}},
  "cat"=>{if let Some(i)=storage::find(arg){unsafe{self.terminal.append(storage::FILES[i].data.str())}}else{self.terminal.append("File not found")}},
  "touch"=>{match storage::put(arg,b""){Ok(())=>{self.terminal.append(if storage::sync(){"Created on disk"}else{"Created in memory"})},Err(e)=>self.terminal.append(e)}},
  "rm"=>{if storage::remove(arg){self.terminal.append(if storage::sync(){"Removed from disk"}else{"Removed from memory"})}else{self.terminal.append("File not found")}},
@@ -1650,7 +1732,8 @@ impl Desktop {
  "sdk"=>self.package_install(1, true),
  "dev"=>crate::developer::command(arg, &mut self.terminal),
  "accounts" if allow_script=>self.users.manage(arg, &mut self.terminal),
- "lock" if allow_script=>{
+ "passwd" if allow_script => self.users.change_password(),
+ "lock" | "logout" if allow_script=>{
      self.checkpoint_draft(true);
      if !self.users.lock() { self.terminal.append("Run accounts to enable sign-in"); }
  },
@@ -1724,9 +1807,13 @@ impl Desktop {
         self.mx = (self.mx + dx).clamp(0, s.w as i32 - 1);
         self.my = (self.my + dy).clamp(0, s.h as i32 - 1);
         if self.users.visible() {
+            let pressed = buttons & 1 != 0 && self.buttons & 1 == 0;
             self.buttons = buttons;
             self.drag = None;
             self.painting = false;
+            if pressed {
+                self.users.click(self.mx, self.my, s.w as i32, s.h as i32);
+            }
             return;
         }
         if wheel != 0 && self.focus < APP_COUNT && self.visible(self.focus) {
@@ -1829,11 +1916,13 @@ impl Desktop {
                             self.ethernet_tab = false;
                             self.open(8);
                         } else if px < 252 {
-                            self.notice.set(if n.start_dhcp(n.vlan) {
-                                "DHCP discovery started"
-                            } else {
-                                "Ethernet is unavailable or busy"
-                            });
+                            if self.users.administrator() {
+                                self.notice.set(if n.start_dhcp(n.vlan) {
+                                    "DHCP discovery started"
+                                } else {
+                                    "Ethernet is unavailable or busy"
+                                });
+                            }
                         } else {
                             crate::audio::volume(-4);
                         }
@@ -1878,6 +1967,18 @@ impl Desktop {
                     .any(|&id| self.visible(id) && self.windows[id].inside(x, y))
             {
                 self.switch_workspace(((x - (width - 194)) / 44) as usize);
+                return;
+            }
+            if Box2::at(18, 10, 156, 32).has(x, y)
+                && !self
+                    .order
+                    .iter()
+                    .any(|&id| self.visible(id) && self.windows[id].inside(x, y))
+            {
+                self.open(9);
+                self.settings_page = 3;
+                self.settings_notice = "";
+                self.restart_armed = false;
                 return;
             }
             for j in (0..APP_COUNT).rev() {
@@ -1954,7 +2055,7 @@ impl Desktop {
                     self.file_cursor = 0;
                     self.file_preview = None;
                     self.file_select(0);
-                } else if x >= 154 && (48..79).contains(&y) {
+                } else if Box2::at(163, 48, 80, 34).has(x, y) {
                     self.file_open_selected();
                 } else if x >= 154 && y >= 126 {
                     let (first, count) = self.file_viewport();
@@ -1971,15 +2072,13 @@ impl Desktop {
                 }
             }
             1 => {
-                if y < 84 {
-                    if x < 115 {
-                        self.save()
-                    } else if x < 220 {
-                        self.checkpoint_draft(true);
-                        self.filename.set("Untitled.txt");
-                        self.note.clear();
-                        self.notice.clear()
-                    }
+                if Box2::at(16, 48, 72, 34).has(x, y) {
+                    self.save()
+                } else if Box2::at(96, 48, 72, 34).has(x, y) {
+                    self.checkpoint_draft(true);
+                    self.filename.set("Untitled.txt");
+                    self.note.clear();
+                    self.notice.clear()
                 }
             }
             3 => {
@@ -2014,11 +2113,17 @@ impl Desktop {
                 }
             }
             4 => {
-                if y >= 160 && y < 400 && x >= 24 && x < 424 {
-                    let col = ((x - 24) / 100) as usize;
-                    let row = ((y - 160) / 60) as usize;
-                    let keys = b"789/456*123-C0=+";
-                    let key = keys[row * 4 + col];
+                let window = self.windows[id];
+                if let Some(key) =
+                    b"789/456*123-C0=+"
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, &key)| {
+                            calculator_key(window.w, window.h, index)
+                                .has(x, y)
+                                .then_some(key)
+                        })
+                {
                     if key == b'C' {
                         self.calc.clear();
                         self.answer.clear()
@@ -2054,6 +2159,8 @@ impl Desktop {
             8 => {
                 if (46..80).contains(&y) && (24..246).contains(&x) {
                     self.ethernet_tab = x < 136;
+                } else if !self.users.administrator() {
+                    self.wifi_status = "Network configuration requires an administrator";
                 } else if self.ethernet_tab {
                     self.ethernet.click(x, y, self.windows[8].w, n);
                 } else if self.scanning_results {
@@ -2144,6 +2251,7 @@ impl Desktop {
     }
     fn draw(&self, s: &mut Screen, n: &Network) {
         if self.users.visible() {
+            s.theme = 0;
             self.users.draw(s);
             return;
         }
@@ -2151,9 +2259,9 @@ impl Desktop {
         let h = s.h as i32;
         s.wallpaper_variant((self.wallpaper as usize + self.workspace) % 4);
         s.theme = self.theme;
-        Box2::at(18, 10, 144, 32).glass(s, 13, 0xe8f1fa, 225);
+        Box2::at(18, 10, 156, 32).glass(s, 13, 0xe8f1fa, 225);
         s.symbol(29, 16, 15, self.accent);
-        s.text(55, 17, "KreativeOS", INK, 1);
+        s.text(55, 17, clip_label(self.users.name(), 108, 1), INK, 1);
         Box2::at(w - 198, 6, 184, 36).glass(s, 13, 0xe8f1fa, 220);
         for (i, label) in ["1", "2", "3", "4"].iter().enumerate() {
             let xx = w - 194 + i as i32 * 44;
@@ -2464,7 +2572,7 @@ impl Desktop {
             w,
             h,
             10,
-            if active { 0xa6c5df } else { 0x8fa6bb },
+            if active { 0x9cafc1 } else { 0xc1ccd7 },
             255,
         );
         s.rounded(x + 1, y + 1, w - 2, h - 2, 9, PANEL, 255);
@@ -2474,16 +2582,10 @@ impl Desktop {
             w - 2,
             37,
             8,
-            if active { 0xe3edf9 } else { 0xdde6ee },
+            if active { 0xf4f7fb } else { 0xebeff4 },
             255,
         );
-        s.rect(
-            x + 1,
-            y + 35,
-            w - 2,
-            3,
-            if active { 0xbdd2e8 } else { 0xc5d2df },
-        );
+        s.rect(x + 1, y + 37, w - 2, 1, DIVIDER);
         s.symbol(x + 11, y + 8, id, self.accent);
         s.text(x + 42, y + 9, NAMES[id], INK, 1);
         for (i, label) in ["_", "+", "x"].iter().enumerate() {
@@ -2519,26 +2621,34 @@ impl Desktop {
             ORGANIZER => self.organizer.draw(s, x, y, w, self.accent),
             HARDWARE_CENTER => self.hardware_center.draw(s, x, y, w, h, n, self.accent),
             0 => {
-                s.rect(x + 1, y + 39, 142, h - 54, 0xe7ede2);
-                s.text(x + 18, y + 59, "Locations", MUTED, 1);
+                s.rect(x + 1, y + 38, 142, h - 39, SURFACE);
+                s.rect(x + 143, y + 38, 1, h - 39, DIVIDER);
+                s.text(x + 18, y + 58, "Locations", INK, 2);
                 for (row, label) in ["Documents", "Image library"].iter().enumerate() {
                     let yy = y + 94 + row as i32 * 35;
                     let selected = row == usize::from(self.file_images);
                     if selected {
-                        s.rounded(x + 9, yy - 5, 126, 30, 7, 0xc4dfcf, 255)
+                        s.rounded(x + 9, yy - 5, 126, 30, 6, SELECTED, 255)
                     }
-                    s.text(
-                        x + 22,
-                        yy,
-                        label,
-                        if selected { 0x32695f } else { MUTED },
-                        1,
+                    s.symbol(
+                        x + 13,
+                        yy - 1,
+                        if row == 0 { 0 } else { IMAGES },
+                        self.accent,
                     );
+                    s.text(x + 38, yy, label, if selected { INK } else { MUTED }, 1);
                 }
-                button(s, x + 164, y + 48, 94, "Open", self.accent);
-                s.rounded(x + 163, y + 87, w - 180, 28, 5, 0xffffff, 255);
+                button(s, x + 163, y + 48, 80, "Open", self.accent);
+                s.input_box(
+                    x + 163,
+                    y + 87,
+                    w - 180,
+                    28,
+                    self.file_search.len > 0,
+                    self.accent,
+                );
                 let search = if self.file_search.len == 0 {
-                    "Type to search files"
+                    "Search files"
                 } else {
                     self.file_search.str()
                 };
@@ -2547,30 +2657,31 @@ impl Desktop {
                 let (first, count) = self.file_viewport();
                 let split = w >= 480;
                 let list_width = if split { 166 } else { w - 180 };
+                s.rounded(x + 163, y + 126, list_width, h - 147, 6, 0xffffff, 255);
+                if items.is_empty() {
+                    s.text(x + 174, y + 134, "No matching files", MUTED, 1);
+                }
                 for (row, &index) in items.iter().enumerate().skip(first).take(count) {
                     let yy = y + 126 + (row - first) as i32 * 36;
                     let name = if self.file_images {
                         self.images.files[index].0
                     } else {
-                        unsafe { storage::FILES[index].name.str() }
+                        storage::visible_name(unsafe { storage::FILES[index].name.str() })
+                            .unwrap_or("")
                     };
-                    s.rounded(
-                        x + 163,
-                        yy,
-                        list_width,
-                        32,
-                        6,
-                        if row == self.file_cursor {
-                            0xc4dfcf
-                        } else {
-                            0xffffff
-                        },
-                        255,
+                    if row == self.file_cursor {
+                        s.rounded(x + 165, yy + 2, list_width - 4, 30, 5, SELECTED, 255);
+                    }
+                    s.symbol(
+                        x + 171,
+                        yy + 7,
+                        if self.file_images { IMAGES } else { 1 },
+                        self.accent,
                     );
                     s.text(
-                        x + 172,
+                        x + 198,
                         yy + 7,
-                        clip_label(name, list_width - 16, 1),
+                        clip_label(name, list_width - 43, 1),
                         INK,
                         1,
                     );
@@ -2601,46 +2712,62 @@ impl Desktop {
                             } else {
                                 data.str()
                             };
-                            s.wrapped(x + 339, y + 128, w - 351, h - 143, preview, MUTED);
+                            s.text(x + 342, y + 128, "Preview", INK, 1);
+                            s.rect(x + 342, y + 153, w - 359, 1, DIVIDER);
+                            s.wrapped_small(x + 342, y + 162, w - 359, h - 179, preview, MUTED);
                         }
                     }
                 }
-                s.text(x + 18, y + h - 38, "On this computer", MUTED, 1);
+                let mut count = Text::<32>::new();
+                let _ = write!(count, "{} items", items.len());
+                s.text(x + 18, y + h - 38, count.str(), MUTED, 1);
             }
             1 => {
-                button(s, x + 16, y + 48, 90, "Save", self.accent);
-                button(s, x + 120, y + 48, 90, "New", SURFACE);
-                s.text(x + 230, y + 58, self.filename.str(), MUTED, 1);
-                s.rounded(x + 16, y + 94, w - 32, h - 144, 10, 0xffffff, 255);
-                let (heading, body) = self
-                    .note
-                    .str()
-                    .split_once('\n')
-                    .unwrap_or((self.note.str(), ""));
-                s.text(x + 36, y + 112, heading, INK, 3);
-                s.wrapped(x + 36, y + 155, w - 72, h - 220, body, 0x6e7588);
+                button(s, x + 16, y + 48, 72, "Save", self.accent);
+                button(s, x + 96, y + 48, 72, "New note", SURFACE);
+                s.text(
+                    x + 188,
+                    y + 56,
+                    clip_label(self.filename.str(), w - 206, 2),
+                    INK,
+                    2,
+                );
+                s.input_box(x + 16, y + 94, w - 32, h - 141, false, self.accent);
+                let text = self.note.str();
+                let tail = tail_lines(text, ((h - 165) / 23).max(1) as usize);
+                s.wrapped(x + 34, y + 109, w - 68, h - 162, tail, INK);
+                let mut count = Text::<48>::new();
+                let _ = write!(count, "{} words", text.split_whitespace().count());
+                s.text(x + w - 105, y + h - 34, count.str(), MUTED, 1);
                 s.text(
                     x + 22,
                     y + h - 34,
                     if self.notice.len > 0 {
                         self.notice.str()
                     } else {
-                        "All your ideas start somewhere."
+                        ""
                     },
                     MUTED,
                     1,
                 );
             }
             2 => {
-                s.rect(x + 12, y + 48, w - 24, h - 95, 0x07111d);
+                s.rounded(x + 12, y + 48, w - 24, h - 63, 8, 0x142337, 255);
                 let text = self.terminal.str();
                 let visible = tail_lines(text, ((h - 125) / 18) as usize);
-                s.wrapped(x + 22, y + 58, w - 44, h - 120, visible, 0xa5e8c9);
-                s.text(x + 22, y + h - 32, ">", self.accent, 2);
-                s.text(x + 46, y + h - 32, self.command.str(), INK, 2);
+                s.wrapped_small(x + 26, y + 59, w - 52, h - 122, visible, 0xe2edf8);
+                s.rect(x + 13, y + h - 52, w - 26, 1, 0x435870);
+                s.text(x + 26, y + h - 45, ">", 0x8ce2cd, 2);
+                s.text(
+                    x + 49,
+                    y + h - 45,
+                    clip_label(self.command.str(), w - 71, 2),
+                    0xffffff,
+                    2,
+                );
             }
             3 => {
-                s.rounded(x + 14, y + 48, w - 110, 34, 7, 0xffffff, 255);
+                s.input_box(x + 14, y + 48, w - 110, 34, false, self.accent);
                 let url = self.url.str();
                 s.text(
                     x + 23,
@@ -2654,9 +2781,11 @@ impl Desktop {
                     1,
                 );
                 button(s, x + w - 86, y + 48, 72, "Go", self.accent);
-                for (slot, label) in ["1", "2", "3", "4", "Save link", "Library", "Download"]
-                    .iter()
-                    .enumerate()
+                for (slot, label) in [
+                    "Tab 1", "Tab 2", "Tab 3", "Tab 4", "Bookmark", "Library", "Download",
+                ]
+                .iter()
+                .enumerate()
                 {
                     let left = x + 14 + (slot as i32 * (w - 28) + 6) / 7;
                     let right = x + 14 + ((slot + 1) as i32 * (w - 28) + 6) / 7;
@@ -2666,7 +2795,7 @@ impl Desktop {
                         right - left - 3,
                         24,
                         4,
-                        if self.tab == slot { 0xc4dfcf } else { SURFACE },
+                        if self.tab == slot { SELECTED } else { PANEL },
                         255,
                     );
                     s.centered(
@@ -2679,7 +2808,7 @@ impl Desktop {
                         1,
                     );
                 }
-                s.rect(x + 14, y + 119, w - 28, h - 167, 0xffffff);
+                s.input_box(x + 14, y + 119, w - 28, h - 167, false, self.accent);
                 let image_height = if self.web_picture.is_some() {
                     if self.page.len == 0 {
                         h - 182
@@ -2713,13 +2842,17 @@ impl Desktop {
                     s.image(x + 26, y + 125, w - 52, image_height, image, false);
                 }
                 if self.web_list == 0 && self.page.len > 0 {
-                    let start = self.scroll.min(self.page.len);
+                    let page = self.page.str();
+                    let mut start = self.scroll.min(page.len());
+                    while !page.is_char_boundary(start) {
+                        start -= 1;
+                    }
                     s.wrapped(
                         x + 26,
                         y + 132 + image_height,
                         w - 52,
                         (h - 189 - image_height).max(0),
-                        &self.page.str()[start..],
+                        &page[start..],
                         INK,
                     );
                 }
@@ -2743,17 +2876,46 @@ impl Desktop {
                 }
             }
             4 => {
-                s.text(x + 24, y + 63, self.calc.str(), INK, 2);
-                s.text(x + 24, y + 105, self.answer.str(), self.accent, 3);
-                let keys = b"789/456*123-C0=+";
-                for row in 0..4 {
-                    for col in 0..4 {
-                        let xx = x + 24 + col * 100;
-                        let yy = y + 160 + row * 60;
-                        s.round(xx, yy, 90, 50, SURFACE);
-                        let b = [keys[(row * 4 + col) as usize]];
-                        s.centered(xx, yy, 90, 50, core::str::from_utf8(&b).unwrap(), INK, 3)
-                    }
+                s.input_box(x + 24, y + 48, w - 48, 79, false, self.accent);
+                s.text(
+                    x + 39,
+                    y + 57,
+                    clip_label(self.calc.str(), w - 78, 2),
+                    INK,
+                    2,
+                );
+                s.text(
+                    x + 39,
+                    y + 86,
+                    clip_label(self.answer.str(), w - 78, 3),
+                    self.accent,
+                    3,
+                );
+                for (index, label) in [
+                    "7", "8", "9", "/", "4", "5", "6", "*", "1", "2", "3", "-", "Clear", "0", "=",
+                    "+",
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let r = calculator_key(w, h, index);
+                    let color = if label == "=" {
+                        self.accent
+                    } else if index % 4 == 3 {
+                        SELECTED
+                    } else {
+                        SURFACE
+                    };
+                    s.rounded(x + r.x, y + r.y, r.w, r.h, 6, color, 255);
+                    s.centered(
+                        x + r.x,
+                        y + r.y,
+                        r.w,
+                        r.h,
+                        label,
+                        if label == "=" { 0xffffff } else { INK },
+                        2,
+                    );
                 }
             }
             5 => {
@@ -3199,7 +3361,7 @@ fn paint_line(mut x: i32, mut y: i32, x1: i32, y1: i32, c: u32) {
     }
 }
 pub fn run(mut s: Screen, mut network: Network) -> ! {
-    let mut desktop = Desktop::new(s.w, s.h);
+    let mut desktop = Desktop::new(s.w, s.h, crate::users::Session::new());
     let mut input = Input::new();
     let mut dirty = false;
     let mut last = 0;
@@ -3210,9 +3372,12 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
     let mut shown = (desktop.mx, desktop.my);
     s.pointer(None, shown);
     unsafe { hardware::log(b"KreativeOS: desktop ready\r\n") };
+    desktop.users.log_initial_view();
+    let mut auth_region = desktop.users.region(s.w as i32, s.h as i32);
     loop {
         for _ in 0..32 {
             if let Some(e) = input.poll() {
+                let previous_account = desktop.users.current();
                 match e {
                     Event::Key(k) => {
                         desktop.key(k, &mut network);
@@ -3234,6 +3399,21 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
                         }
                     }
                 }
+                if desktop.users.current() != previous_account {
+                    crate::audio::stop();
+                    network.clear_browser_session();
+                    if desktop.users.current().is_some() {
+                        storage::set_standard_account(desktop.users.standard_name());
+                        let pointer = (desktop.mx, desktop.my, desktop.buttons);
+                        let users =
+                            core::mem::replace(&mut desktop.users, crate::users::Session::new());
+                        desktop = Desktop::new(s.w, s.h, users);
+                        (desktop.mx, desktop.my, desktop.buttons) = pointer;
+                        unsafe { PAINT.fill(0xf2f0e9) };
+                        unsafe { hardware::log(b"KreativeOS: graphical session ready\r\n") };
+                    }
+                    dirty = true;
+                }
             }
         }
         desktop.checkpoint_draft(false);
@@ -3241,13 +3421,16 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
         if network.tls_pending {
             desktop.draw(&mut s, &network);
             s.present();
+            auth_region = desktop.users.region(s.w as i32, s.h as i32);
             shown = (desktop.mx, desktop.my);
             s.pointer(None, shown);
             crate::secure::fetch(&mut network);
         }
         if network.changed {
             network.changed = false;
-            desktop.receive_web(&mut network);
+            if desktop.users.current().is_some() {
+                desktop.receive_web(&mut network);
+            }
             dirty = true
         }
         if desktop.visible(6) && hardware::millis() - desktop.snake.at >= 140 {
@@ -3277,9 +3460,16 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
         }
         if dirty && hardware::millis() - last >= 16 {
             desktop.draw(&mut s, &network);
-            s.present();
+            let region = desktop.users.region(s.w as i32, s.h as i32);
+            if let Some(bounds) = region.filter(|_| auth_region == region) {
+                s.present_region(bounds.x, bounds.y, bounds.w, bounds.h);
+                s.pointer(Some(shown), (desktop.mx, desktop.my));
+            } else {
+                s.present();
+                s.pointer(None, (desktop.mx, desktop.my));
+            }
+            auth_region = region;
             shown = (desktop.mx, desktop.my);
-            s.pointer(None, shown);
             dirty = false;
             last = hardware::millis()
         }

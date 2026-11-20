@@ -113,11 +113,12 @@ impl Center {
             let (bus, slot, function) = disk.bdf;
             let _ = writeln!(
                 report,
-                "{} @ {bus:02x}:{slot:02x}.{function} / {} {} / {} sectors",
+                "{} @ {bus:02x}:{slot:02x}.{function} / {} {} / {} sectors, {} bytes each",
                 disk.model.str(),
                 disk.location,
                 disk.unit,
-                disk.sectors
+                disk.sectors,
+                disk.sector_size
             );
         }
         let _ = writeln!(
@@ -255,10 +256,11 @@ impl Center {
                     value.clear();
                     let _ = write!(
                         value,
-                        "{bus:02x}:{slot:02x}.{function}   /   {} {}   /   {} MiB",
+                        "{bus:02x}:{slot:02x}.{function}   /   {} {}   /   {} MiB   /   {} B logical",
                         disk.location,
                         disk.unit,
-                        disk.sectors / 2048
+                        disk.sectors / (1048576 / disk.sector_size as u64),
+                        disk.sector_size
                     );
                     card(s, x + 20, y + 250, w - 40, disk.model.str(), value.str());
                 }

@@ -1,4 +1,4 @@
-//! Polled AHCI 1.3.1 SATA transport for explicitly provisioned KFS media.
+//! Polled AHCI 1.3.1 SATA transport for HDDs and SSDs.
 use crate::{
     hardware::{millis, pci, pci_write},
     text::Text,
@@ -9,7 +9,7 @@ use core::{
 };
 
 pub const PAGES: usize = 16;
-use crate::storage::{identity_mmio, marked_volume, Media, MARKER_LBA};
+use crate::storage::{identity_mmio, Media};
 const CL: usize = 0;
 const RFIS: usize = 1024;
 const TABLE: usize = 1280;
@@ -39,6 +39,7 @@ pub struct Disk {
     pub port: u8,
     pub bdf: (u8, u8, u8),
     pub sectors: u64,
+    pub sector_size: usize,
     pub model: Text<40>,
     pub media: Option<Media>,
     usable: bool,
@@ -111,8 +112,8 @@ impl Disk {
         self.put(CMD, self.get(CMD) | ST);
         true
     }
-    unsafe fn command(&mut self, opcode: u8, lba: u32, data: &mut [u8], write: bool) -> bool {
-        if !self.usable || data.len() > MAX_BYTES || data.len() % 512 != 0 {
+    unsafe fn command(&mut self, opcode: u8, lba: u64, data: &mut [u8], write: bool) -> bool {
+        if !self.usable || data.len() > MAX_BYTES {
             return false;
         }
         if self.get(SSTS) & 15 != 3
@@ -136,8 +137,8 @@ impl Disk {
             let bytes = lba.to_le_bytes();
             fis[4..7].copy_from_slice(&bytes[..3]);
             fis[7] = 0x40;
-            fis[8] = bytes[3];
-            fis[12..14].copy_from_slice(&((data.len() / 512) as u16).to_le_bytes());
+            fis[8..11].copy_from_slice(&bytes[3..6]);
+            fis[12..14].copy_from_slice(&((data.len() / self.sector_size) as u16).to_le_bytes());
         }
         ptr::copy_nonoverlapping(fis.as_ptr(), table, fis.len());
         if region != 0 {
@@ -170,16 +171,26 @@ impl Disk {
         }
         true
     }
-    pub unsafe fn transfer(&mut self, lba: u32, bytes: &mut [u8], write: bool) -> bool {
-        let end = u64::from(lba) + bytes.len() as u64 / 512;
+    pub unsafe fn transfer(&mut self, lba: u64, bytes: &mut [u8], write: bool) -> bool {
+        let Some(end) = lba.checked_add((bytes.len() / self.sector_size) as u64) else {
+            return false;
+        };
         if bytes.is_empty()
+            || bytes.len() % self.sector_size != 0
             || end > self.sectors
+            || end > 1 << 48
             || (write && !self.media.is_some_and(|media| media.writable(lba, end)))
         {
             return false;
         }
-        self.command(if write { 0x35 } else { 0x25 }, lba, bytes, write)
-            && (!write || self.command(0xea, 0, &mut [], false))
+        let chunk_bytes = MAX_BYTES / self.sector_size * self.sector_size;
+        for (index, chunk) in bytes.chunks_mut(chunk_bytes).enumerate() {
+            let block = lba + (index * (chunk_bytes / self.sector_size)) as u64;
+            if !self.command(if write { 0x35 } else { 0x25 }, block, chunk, write) {
+                return false;
+            }
+        }
+        !write || self.command(0xea, 0, &mut [], false)
     }
     unsafe fn identify(&mut self) -> bool {
         let mut info = [0u8; 512];
@@ -188,14 +199,19 @@ impl Disk {
         }
         let word = |i: usize| u16::from_le_bytes([info[i * 2], info[i * 2 + 1]]);
         let geometry = word(106);
+        self.sector_size = if geometry & 0xd000 == 0x5000 {
+            ((u32::from(word(118)) << 16 | u32::from(word(117))) as usize) * 2
+        } else {
+            512
+        };
         if word(49) & (1 << 8) == 0
             || word(83) & 0xe400 != 0x6400
-            || (geometry & 0xd000 == 0x5000 && (word(117) != 256 || word(118) != 0))
+            || !matches!(self.sector_size, 512 | 4096)
         {
             return false;
         }
         self.sectors = u64::from_le_bytes(info[200..208].try_into().unwrap());
-        if self.sectors < 16384 {
+        if self.sectors < 24 || self.sectors > 1 << 48 {
             return false;
         }
         let mut model = [b' '; 40];
@@ -266,6 +282,7 @@ pub unsafe fn discover() -> Option<Disk> {
                         port,
                         bdf: (b, d, f),
                         sectors: 0,
+                        sector_size: 512,
                         model: Text::new(),
                         media: None,
                         usable: true,
@@ -276,13 +293,12 @@ pub unsafe fn discover() -> Option<Disk> {
                         }
                         continue;
                     }
-                    let mut label = [0u8; 512];
-                    let mut first = [0u8; 512];
-                    if disk.identify()
-                        && disk.transfer(MARKER_LBA, &mut label, false)
-                        && disk.transfer(0, &mut first, false)
-                    {
-                        if let Some(media) = marked_volume(&label, &first, disk.sectors) {
+                    if disk.identify() {
+                        if let Some(media) =
+                            crate::partition::probe(disk.sectors, disk.sector_size, |lba, bytes| {
+                                disk.transfer(lba, bytes, false)
+                            })
+                        {
                             disk.media = Some(media);
                             return Some(disk);
                         }
