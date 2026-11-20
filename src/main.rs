@@ -2,6 +2,7 @@
 #![no_main]
 #![allow(static_mut_refs)]
 extern crate alloc;
+mod archive;
 mod audio;
 mod ax210;
 mod ax_dma;

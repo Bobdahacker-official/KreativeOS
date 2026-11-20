@@ -434,15 +434,45 @@ impl Desktop {
         let Some(index) = storage::find(name.str()) else {
             return;
         };
-        if name.str().ends_with(".html") {
+        let file = unsafe { storage::FILES[index].data };
+        if file.bytes[..file.len].starts_with(b"PK\x03\x04") || name.str().ends_with(".zip") {
+            self.archive(name.str(), false);
+            self.open(2);
+        } else if name.str().ends_with(".html") {
             self.url.set("file:");
             self.url.append(name.str());
             self.load_local();
             self.open(3);
         } else {
             self.filename = name;
-            self.note = unsafe { storage::FILES[index].data };
+            self.note = file;
             self.open(1);
+        }
+    }
+    fn archive(&mut self, name: &str, extract: bool) {
+        let Some(index) = storage::find(name) else {
+            self.terminal.append("Archive not found");
+            return;
+        };
+        let data = unsafe { storage::FILES[index].data };
+        let Some(entries) = crate::archive::read(&data.bytes[..data.len]) else {
+            self.terminal
+                .append("Unsupported ZIP layout, file size or checksum");
+            return;
+        };
+        if extract {
+            self.terminal
+                .append(match crate::archive::extract(&entries) {
+                    Ok(true) => "Extracted to Files",
+                    Ok(false) => "Extracted in memory",
+                    Err(error) => error,
+                });
+        } else {
+            let _ = writeln!(self.terminal, "\n{} ({} entries)", name, entries.len());
+            for entry in entries {
+                let _ = writeln!(self.terminal, "{}", entry.name);
+            }
+            let _ = writeln!(self.terminal, "Type unzip {name} to extract.");
         }
     }
     fn alert(&mut self, event: &'static str) {
@@ -1002,7 +1032,7 @@ impl Desktop {
         self.terminal.push(b'\n');
         let (verb, arg) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
         match verb{
- "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nrun NAME | sdk | install NAME.kapp | reboot\n"),
+ "help"=>self.terminal.append("help | ls | cat NAME | touch NAME | rm NAME\nedit NAME | save | clear | open APP\nbrowse URL | net | uptime | calc EXPR\ndhcp [VLAN] | static IP MASK ROUTER DNS [VLAN]\nziplist NAME | unzip NAME | run NAME\nsdk | install NAME.kapp | reboot\n"),
  "ls"=>unsafe{for f in &storage::FILES{if f.used{let _=writeln!(self.terminal,"{}  {} bytes",f.name.str(),f.data.len);}}},
  "cat"=>{if let Some(i)=storage::find(arg){unsafe{self.terminal.append(storage::FILES[i].data.str())}}else{self.terminal.append("File not found")}},
  "touch"=>{match storage::put(arg,b""){Ok(())=>{self.terminal.append(if storage::sync(){"Created on disk"}else{"Created in memory"})},Err(e)=>self.terminal.append(e)}},
@@ -1024,6 +1054,8 @@ impl Desktop {
  "calc"=>{self.calc.set(arg);self.calculate();self.terminal.append(self.answer.str())},
  "install"=>{if let Some(index) = crate::packages::CATALOG.iter().position(|p| p.source == arg) { self.package_install(index, false); self.terminal.append(self.notice.str()); } else { self.terminal.append("Package is not in the signed catalog"); }},
  "sdk"=>self.package_install(1, true),
+ "ziplist"=>self.archive(arg, false),
+ "unzip"=>self.archive(arg, true),
  "run" if allow_script => {
    if let Some(index) = storage::find(arg) {
        let script = unsafe { storage::FILES[index].data };
