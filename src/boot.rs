@@ -266,10 +266,15 @@ unsafe fn inspect_ax210(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut 
         };
         let write = |offset, mut value| ((*pci).mem_write)(pci, 2, 0, offset, 1, &mut value) == 0;
         // Never touch device registers unless a complete firmware container was staged.
-        ax210::HARDWARE = if ax210::staged_firmware().is_some() {
-            ax210::prepare_bar(read, write, || {
-                (bs.stall)(10);
-            })
+        ax210::HARDWARE = if let Some(dma) = crate::ax_dma::BOOTSTRAP.as_ref() {
+            ax210::prepare_bar(
+                read,
+                write,
+                || {
+                    (bs.stall)(10);
+                },
+                |revision| dma.set_mac_revision(revision),
+            )
         } else {
             HardwareState::NotAttempted
         };

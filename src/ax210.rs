@@ -41,6 +41,7 @@ pub fn prepare_bar(
     read: impl Fn(u64) -> Option<u32>,
     write: impl Fn(u64, u32) -> bool,
     mut delay: impl FnMut(),
+    mut identified: impl FnMut(u16),
 ) -> HardwareState {
     const IF_CONFIG: u64 = 0x000;
     const HW_REV: u64 = 0x028;
@@ -57,6 +58,7 @@ pub fn prepare_bar(
     if revision & 0xfff0 != 0x0420 || radio & 0x00fff000 != 0x0010d000 {
         return HardwareState::UnrecognizedRadio;
     }
+    identified(revision as u16);
     let Some(original) = read(IF_CONFIG) else {
         return HardwareState::BarUnavailable;
     };
@@ -143,9 +145,9 @@ pub fn probe() -> Status {
         unsafe { hardware::log(b"KreativeOS: AX210 firmware rejected\r\n") };
     }
     if let Some(dma) = unsafe { crate::ax_dma::BOOTSTRAP.as_ref() } {
-        let mut line: Text<128> = Text::new();
-        let _ = write!(line, "KreativeOS: AX210 DMA prepared (IML {:#x}/{}; LMAC {} at {:#x}; UMAC {} at {:#x}; paging {})\r\n",
-            dma.iml.address, dma.iml.bytes, dma.counts[0], dma.lmac[0].address, dma.counts[1], dma.umac[0].address, dma.counts[2]);
+        let mut line: Text<192> = Text::new();
+        let _ = write!(line, "KreativeOS: AX210 DMA prepared (IML {:#x}/{}; LMAC {} at {:#x}; UMAC {} at {:#x}; paging {}; context {:#x})\r\n",
+            dma.iml.address, dma.iml.bytes, dma.counts[0], dma.lmac[0].address, dma.counts[1], dma.umac[0].address, dma.counts[2], dma.context.address);
         unsafe { hardware::log(&line.bytes[..line.len]) };
     }
     Status {
