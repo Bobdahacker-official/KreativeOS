@@ -5,6 +5,7 @@ use crate::{
     text::Text,
 };
 use alloc::collections::VecDeque;
+use alloc::vec::Vec;
 pub static mut DMA: usize = 0;
 fn u16be(b: &[u8], n: usize) -> u16 {
     u16::from_be_bytes([b[n], b[n + 1]])
@@ -56,13 +57,14 @@ pub struct Network {
     pub sent_bytes: u64,
     pub status: &'static str,
     pub body: Text<12288>,
+    http_bytes: Vec<u8>,
     pub changed: bool,
     rx: usize,
     tx: usize,
     gateway: [u8; 6],
     remote: [u8; 4],
     pub host: Text<128>,
-    pub path: Text<256>,
+    pub path: Text<384>,
     pub state: u8,
     secure: bool,
     pub remote_port: u16,
@@ -131,6 +133,7 @@ impl Network {
             io: 0,
             wifi: crate::wifi::Module::new(),
             response: None,
+            http_bytes: Vec::new(),
             intel: None,
             mac: [0; 6],
             received: 0,
@@ -615,11 +618,16 @@ impl Network {
     }
     fn fail(&mut self, s: &'static str) {
         self.state = 0;
+        self.http_bytes = Vec::new();
         self.status = s;
         self.changed = true
     }
     pub fn clear_browser_session(&mut self) {
+        if matches!(self.state, 4 | 5) {
+            self.tcp(0x14, &[], false);
+        }
         self.state = 0;
+        self.http_bytes = Vec::new();
         self.host.clear();
         self.path.clear();
         self.dns_name.clear();
@@ -652,7 +660,9 @@ impl Network {
             self.fail("Use an https://, http:// or file: address");
             return;
         };
-        let (authority, path) = s.split_once('/').unwrap_or((s, ""));
+        let s = s.split('#').next().unwrap_or("");
+        let boundary = s.find(['/', '?']).unwrap_or(s.len());
+        let (authority, path) = s.split_at(boundary);
         let host = if let Some((h, p)) = authority.split_once(':') {
             match p.parse::<u16>() {
                 Ok(port) if port > 0 => {
@@ -668,7 +678,7 @@ impl Network {
             authority
         };
         if host.len() > 127
-            || path.len() > 250
+            || url.len() > 384
             || !host
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
@@ -681,7 +691,9 @@ impl Network {
         self.host.set(host);
         self.dns_name.set(host.trim_end_matches('.'));
         self.dns_aliases = 0;
-        self.path.set("/");
+        if !path.starts_with('/') {
+            self.path.set("/");
+        }
         self.path.append(path);
         if self.wifi.joined && self.secure {
             self.status = "Connecting over Wi-Fi";
@@ -846,6 +858,15 @@ impl Network {
         self.status = status;
         self.changed = true;
     }
+    pub fn accept_response(&mut self, response: crate::web::Response) {
+        self.body.clear();
+        if response.media == crate::web::Media::Text {
+            for &byte in response.bytes.iter().take(self.body.bytes.len()) {
+                self.body.push(if byte.is_ascii() { byte } else { b'?' });
+            }
+        }
+        self.response = Some(response);
+    }
     fn frame(&mut self, f: &[u8]) {
         if f.len() < 14 || (f[..6] != self.mac && f[..6] != [255; 6]) {
             return;
@@ -990,12 +1011,8 @@ impl Network {
                     self.status = "Securing connection...";
                     return;
                 }
-                let mut req: Text<512> = Text::new();
-                req.append("GET ");
-                req.append(self.path.str());
-                req.append(" HTTP/1.0\r\nHost: ");
-                req.append(self.host.str());
-                req.append("\r\nUser-Agent: KreativeOS/0.1\r\nConnection: close\r\n\r\n");
+                let req =
+                    crate::web::request(self.host.str(), self.path.str(), self.remote_port, false);
                 self.tcp(0x18, &req.bytes[..req.len], true);
                 self.seq = self.seq.wrapping_add(req.len as u32);
                 self.state = 4;
@@ -1036,22 +1053,25 @@ impl Network {
                     return;
                 }
                 let data = &d[off..];
-                for &b in data {
-                    self.body.push(if b < 128 { b } else { b'?' })
-                }
                 self.ack = self.ack.wrapping_add(data.len() as u32);
-                if !data.is_empty() {
-                    self.changed = true
+                if self.http_bytes.len() + data.len() > crate::web::MAX_RESPONSE {
+                    self.tcp(0x14, &[], false);
+                    self.fail("HTTP response exceeds the browser size limit");
+                    return;
                 }
+                self.http_bytes.extend_from_slice(data);
                 if flags & 1 != 0 {
                     self.ack = self.ack.wrapping_add(1);
+                }
+                if flags & 1 != 0 || (!data.is_empty() && crate::web::complete(&self.http_bytes)) {
                     self.tcp(0x11, &[], false);
-                    self.seq = self.seq.wrapping_add(1);
                     self.state = 0;
-                    self.status = if self.body.len == 12288 {
-                        "Page loaded (12 KiB limit)"
+                    let bytes = core::mem::take(&mut self.http_bytes);
+                    self.status = if let Some(response) = crate::web::parse(bytes) {
+                        self.accept_response(response);
+                        "Page loaded over HTTP"
                     } else {
-                        "Page loaded"
+                        "HTTP server returned an error or unsupported response"
                     };
                     self.changed = true
                 } else if !data.is_empty() {
@@ -1073,7 +1093,6 @@ fn udp_payload<'a>(addresses: &[u8], packet: &'a [u8]) -> Option<&'a [u8]> {
 /// Text layout for HTML bodies. Suppresses script/style and decodes common entities.
 pub fn readable(src: &str, out: &mut Text<12288>) {
     out.clear();
-    let src = src.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(src);
     let b = src.as_bytes();
     let mut i = 0;
     let mut hidden = false;

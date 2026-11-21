@@ -51,7 +51,7 @@ The image also provides the removable UEFI boot path `EFI/BOOT/BOOTX64.EFI`. For
 
 Set `OVMF_CODE` and `OVMF_VARS` if your firmware files use different paths. The supplied machine uses 256 MiB RAM, standard VGA, PS/2 input, RTL8139 Ethernet, a VirtIO boot disk (read by UEFI), and an IDE primary-master data disk. The operating system contains no Linux components; Linux, macOS or Windows can be used as a build host.
 
-GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and checks HTTPS against local TLS servers. It uploads the images, serial logs and desktop screenshot as `KreativeOS-x86_64`.
+GitHub Actions compiles the Rust binary, verifies a headless QEMU boot, and exercises the browser against local HTTP and TLS servers. It uploads disk images, checksums, and serial logs as `KreativeOS-x86_64`.
 
 ## Desktop
 
@@ -81,7 +81,7 @@ Ethernet requests an IPv4 lease automatically on boot. It renews with the origin
 
 Ethernet supports PCI RTL8139 and Intel 82540EM, 82544GC, 82545EM, and 82574L. QEMU defaults to RTL8139. Set `NIC_MODEL=e1000` for 82540EM or `NIC_MODEL=e1000e` for 82574L. The stack implements Ethernet, ARP, IPv4, UDP DNS with CNAME resolution, and a single bounded TCP/HTTP connection with retransmission and timeouts. DNS is IPv4 only. It reports truncated UDP replies and does not retry them over TCP.
 
-Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. The browser shows page text, the first compatible HTML image and a Play sound button for the first WAV audio source. Direct HTTPS links to PNG, JPEG, BMP and WAV also open. Media responses are capped at 768 KiB. HTTP uses port 80 and HTTP/1.0 connection-close semantics. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. The browser supports authenticated HTTPS redirects and chunked response bodies. Plain HTTP uses the Ethernet interface.
+Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. The browser shows page text, the first compatible HTML image and a Play sound button for the first WAV audio source. Select **Links** to open links from the current web page, and use the scroll wheel or Up/Down to see more. Direct links to PNG, JPEG, BMP and WAV also open. The browser uses HTTP/1.1 and supports redirects, chunked bodies, and single-member gzip. The response buffer and decompressed body are each capped at 768 KiB. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. Plain HTTP uses Ethernet. HTTPS pages and resources stay on HTTPS when following links and redirects.
 
 The graphical desktop uses a cooperative event loop and polled drivers. KR3 programs enter CPU ring 3 in separate address spaces. Paint content stays in memory. KAPP packages contain document apps.
 

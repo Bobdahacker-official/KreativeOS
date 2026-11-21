@@ -182,6 +182,7 @@ enum WebJob {
 struct Tab {
     url: Text<384>,
     page: Text<12288>,
+    links: alloc::vec::Vec<crate::web::Link>,
     picture: Option<crate::pictures::Picture>,
     audio_url: Option<Text<384>>,
     audio: alloc::vec::Vec<u8>,
@@ -324,6 +325,7 @@ struct Desktop {
     command: Text<128>,
     url: Text<384>,
     page: Text<12288>,
+    web_links: alloc::vec::Vec<crate::web::Link>,
     web_job: WebJob,
     resource: Text<384>,
     redirects: u8,
@@ -337,6 +339,7 @@ struct Desktop {
     history: alloc::vec::Vec<Text<384>>,
     bookmarks: alloc::vec::Vec<Text<384>>,
     web_list: u8,
+    web_list_offset: usize,
     native_wifi: crate::ax210::Status,
     wifi_ssid: Text<32>,
     wifi_pass: Text<63>,
@@ -426,6 +429,7 @@ impl Desktop {
             command: Text::new(),
             url: Text::new(),
             page: Text::new(),
+            web_links: alloc::vec::Vec::new(),
             web_job: WebJob::Page,
             resource: Text::new(),
             redirects: 0,
@@ -439,6 +443,7 @@ impl Desktop {
             history: read_urls("History.urls"),
             bookmarks: read_urls("Bookmarks.urls"),
             web_list: 0,
+            web_list_offset: 0,
             native_wifi: crate::ax210::probe(),
             wifi_ssid: Text::new(),
             wifi_pass: Text::new(),
@@ -801,6 +806,7 @@ impl Desktop {
     }
     fn clear_web_media(&mut self) {
         crate::audio::stop();
+        self.web_links.clear();
         self.web_picture = None;
         self.audio_url = None;
         self.audio_clip.clear();
@@ -812,6 +818,7 @@ impl Desktop {
             return;
         }
         self.web_list = 0;
+        self.web_list_offset = 0;
         self.clear_web_media();
         self.scroll = 0;
         if self.url.str().starts_with("file:") {
@@ -859,6 +866,7 @@ impl Desktop {
         self.tabs[self.tab] = Some(alloc::boxed::Box::new(Tab {
             url: self.url,
             page: self.page,
+            links: core::mem::take(&mut self.web_links),
             picture: self.web_picture.take(),
             audio_url: self.audio_url.take(),
             audio: core::mem::take(&mut self.audio_clip),
@@ -868,9 +876,11 @@ impl Desktop {
         }));
         self.tab = tab;
         self.web_list = 0;
+        self.web_list_offset = 0;
         if let Some(saved) = self.tabs[tab].take() {
             self.url = saved.url;
             self.page = saved.page;
+            self.web_links = saved.links;
             self.web_picture = saved.picture;
             self.audio_url = saved.audio_url;
             self.audio_clip = saved.audio;
@@ -882,9 +892,42 @@ impl Desktop {
             self.load_local();
         }
     }
+    fn web_row(&self, index: usize) -> Option<(&str, Text<384>)> {
+        match self.web_list {
+            1 => self
+                .web_links
+                .get(index)
+                .map(|link| (link.label.str(), link.url)),
+            2 => self.bookmarks.get(index).map(|url| ("", *url)),
+            3 => self.history.get(index).map(|url| ("", *url)),
+            _ => None,
+        }
+    }
+    fn scroll_web(&mut self, delta: i32) {
+        if self.web_list == 0 {
+            self.scroll = self
+                .scroll
+                .saturating_add_signed(delta as isize * 80)
+                .min(self.page.len);
+        } else {
+            let count = match self.web_list {
+                1 => self.web_links.len(),
+                2 => self.bookmarks.len(),
+                _ => self.history.len(),
+            };
+            let rows = Self::web_rows(self.windows[3].h);
+            self.web_list_offset = self
+                .web_list_offset
+                .saturating_add_signed(delta as isize)
+                .min(count.saturating_sub(rows));
+        }
+    }
+    fn web_rows(height: i32) -> usize {
+        ((height - 196) / 23).max(0) as usize
+    }
     fn save_download(&mut self) {
         let Some(data) = &self.download else {
-            self.web_status = "No downloadable response within the 2 KiB file limit";
+            self.web_status = "No downloadable response";
             return;
         };
         let mut name = Text::<32>::new();
@@ -930,7 +973,6 @@ impl Desktop {
         let Some(response) = n.response.take() else {
             if n.state == 0 && !self.url.str().starts_with("file:") {
                 if self.web_job == WebJob::Page {
-                    net::readable(n.body.str(), &mut self.page);
                     self.web_status = n.status;
                 } else if !n.verified {
                     self.web_status = n.status;
@@ -944,11 +986,14 @@ impl Desktop {
                 {
                     self.redirects += 1;
                     self.resource = url;
+                    if self.web_job == WebJob::Page {
+                        self.url = url;
+                    }
                     n.browse(url.str());
                     return;
                 }
             }
-            self.web_status = "HTTPS redirect could not be followed";
+            self.web_status = "Redirect could not be followed";
             return;
         }
         if self.web_job == WebJob::Page {
@@ -963,7 +1008,11 @@ impl Desktop {
         if response.media == Media::Image && self.web_job != WebJob::Audio {
             self.web_picture = crate::pictures::decode(&response.bytes);
             self.web_status = if self.web_picture.is_some() {
-                "Image loaded over HTTPS"
+                if n.verified {
+                    "Image loaded over HTTPS"
+                } else {
+                    "Image loaded over HTTP"
+                }
             } else {
                 "Image format or size unsupported"
             };
@@ -983,7 +1032,9 @@ impl Desktop {
         }
         if self.web_job == WebJob::Page {
             net::readable(n.body.str(), &mut self.page);
-            let (image, audio) = crate::web::media_urls(self.resource.str(), n.body.str());
+            let html = core::str::from_utf8(&response.bytes).unwrap_or(n.body.str());
+            self.web_links = crate::web::links(self.resource.str(), html);
+            let (image, audio) = crate::web::media_urls(self.resource.str(), html);
             self.audio_url = audio;
             if let Some(url) = image {
                 self.request(url, WebJob::Image, n);
@@ -1307,8 +1358,8 @@ impl Desktop {
                 0xa1 => self.bookmark(),
                 8 => self.url.pop(),
                 b'\n' => self.navigate(n),
-                0x80 => self.scroll = self.scroll.saturating_sub(80),
-                0x81 => self.scroll = (self.scroll + 80).min(self.page.len),
+                0x80 => self.scroll_web(-1),
+                0x81 => self.scroll_web(1),
                 32..=126 => self.url.push(key),
                 _ => (),
             },
@@ -1955,13 +2006,7 @@ impl Desktop {
                     } else {
                         self.file_cursor + 1
                     }),
-                    3 if wheel > 0 => {
-                        self.scroll = self.scroll.saturating_sub(wheel as usize * 100)
-                    }
-                    3 => {
-                        self.scroll =
-                            (self.scroll + wheel.unsigned_abs() as usize * 100).min(self.page.len)
-                    }
+                    3 => self.scroll_web(-i32::from(wheel)),
                     IMAGES => self.step_image(if wheel > 0 { -1 } else { 1 }),
                     HARDWARE_CENTER => self.hardware_center.scroll(
                         if wheel > 0 { -1 } else { 1 },
@@ -2220,19 +2265,20 @@ impl Desktop {
                     match ((x - 14) * 7 / (w.w - 28)) as usize {
                         tab @ 0..=3 => self.switch_tab(tab, n),
                         4 => self.bookmark(),
-                        5 => self.web_list = (self.web_list + 1) % 3,
+                        5 => {
+                            self.web_list = (self.web_list + 1) % 4;
+                            self.web_list_offset = 0;
+                        }
                         6 => self.save_download(),
                         _ => {}
                     }
-                } else if self.web_list != 0 && (148..w.h - 48).contains(&y) && x >= 14 {
-                    let list = if self.web_list == 1 {
-                        &self.bookmarks
-                    } else {
-                        &self.history
-                    };
-                    if let Some(url) = list.get(((y - 148) / 23) as usize).copied() {
-                        self.url = url;
-                        self.navigate(n);
+                } else if self.web_list != 0 && x >= 14 && y >= 148 {
+                    let row = ((y - 148) / 23) as usize;
+                    if row < Self::web_rows(w.h) && n.state == 0 && !n.tls_pending {
+                        if let Some((_, url)) = self.web_row(self.web_list_offset + row) {
+                            self.url = url;
+                            self.navigate(n);
+                        }
                     }
                 } else if (48..84).contains(&y) && x > w.w - 90 {
                     self.navigate(n);
@@ -2908,7 +2954,7 @@ impl Desktop {
                     x + 23,
                     y + 56,
                     if url.is_empty() {
-                        "Enter an HTTPS address"
+                        "Enter a web address"
                     } else {
                         clip_label(url, w - 136, 1)
                     },
@@ -2917,7 +2963,13 @@ impl Desktop {
                 );
                 button(s, x + w - 86, y + 48, 72, "Go", self.accent);
                 for (slot, label) in [
-                    "Tab 1", "Tab 2", "Tab 3", "Tab 4", "Bookmark", "Library", "Download",
+                    "Tab 1",
+                    "Tab 2",
+                    "Tab 3",
+                    "Tab 4",
+                    "Bookmark",
+                    ["Links", "Bookmarks", "History", "Page"][self.web_list as usize],
+                    "Download",
                 ]
                 .iter()
                 .enumerate()
@@ -2954,21 +3006,20 @@ impl Desktop {
                     0
                 };
                 if self.web_list != 0 {
-                    let (label, list) = if self.web_list == 1 {
-                        ("Bookmarks", &self.bookmarks)
-                    } else {
-                        ("History", &self.history)
-                    };
+                    let label = ["", "Page links", "Bookmarks", "History"][self.web_list as usize];
                     s.text(x + 24, y + 125, label, INK, 1);
-                    for (row, url) in list
-                        .iter()
-                        .take(((h - 196) / 23).max(0) as usize)
-                        .enumerate()
-                    {
+                    for row in 0..Self::web_rows(h) {
+                        let Some((label, url)) = self.web_row(self.web_list_offset + row) else {
+                            if row == 0 {
+                                s.text(x + 24, y + 150, "No entries", MUTED, 1);
+                            }
+                            break;
+                        };
+                        let label = if label.is_empty() { url.str() } else { label };
                         s.text(
                             x + 24,
                             y + 150 + row as i32 * 23,
-                            clip_label(url.str(), w - 48, 1),
+                            clip_label(label, w - 48, 1),
                             self.accent,
                             1,
                         );

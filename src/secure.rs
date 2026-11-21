@@ -262,19 +262,14 @@ pub fn fetch(n: &mut Network) {
             return Err(TlsError::InvalidCertificate);
         }
         unsafe { hardware::log(b"KreativeOS: TLS certificate and hostname verified\r\n") };
-        let mut request: Text<512> = Text::new();
-        request.append("GET ");
-        request.append(path.str());
-        request.append(" HTTP/1.0\r\nHost: ");
-        request.append(host.str());
-        if port != 443 {
-            use core::fmt::Write;
-            let _ = write!(request, ":{}", port);
-        }
-        request.append("\r\nUser-Agent: KreativeOS/0.2\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n");
+        let request = crate::web::request(host.str(), path.str(), port, true);
         let mut offset = 0;
         while offset < request.len {
-            offset += tls.write(&request.bytes[offset..request.len])?;
+            let sent = tls.write(&request.bytes[offset..request.len])?;
+            if sent == 0 {
+                return Err(TlsError::ConnectionClosed);
+            }
+            offset += sent;
         }
         tls.flush()?;
         let mut body = Vec::new();
@@ -303,15 +298,7 @@ pub fn fetch(n: &mut Network) {
     })();
     match result {
         Ok(response) => {
-            if response.media == crate::web::Media::Text {
-                for &byte in &response.bytes {
-                    n.body.push(if byte < 128 { byte } else { b'?' });
-                    if n.body.len == n.body.bytes.len() {
-                        break;
-                    }
-                }
-            }
-            n.response = Some(response);
+            n.accept_response(response);
             n.tls_result(true, "Secure connection - TLS 1.3");
             unsafe { hardware::log(b"KreativeOS: HTTPS page loaded\r\n") }
         }
@@ -383,8 +370,15 @@ fn smoke_get(n: &mut Network, url: &str) -> Option<crate::web::Response> {
 
 #[cfg(feature = "tls-smoke")]
 fn smoke_certificates(n: &mut Network, document: &mut Text<12288>) -> bool {
+    let start = "http://10.0.2.2:18080/start?old=1";
+    let redirect = smoke_get(n, start)
+        .and_then(|response| crate::web::resolve(start, response.location.str()));
+    if !redirect.is_some_and(|url| url.str() == "https://10.0.2.2:8443/?view=1") {
+        unsafe { hardware::log(b"KreativeOS: TLS CHECK FAILED - HTTP redirect\r\n") };
+        return false;
+    }
     for (url, expected) in [
-        ("https://10.0.2.2:8443/", true),
+        ("https://10.0.2.2:8443/?view=1", true),
         ("https://10.0.2.2:8444/", false),
         ("https://10.0.2.2:8445/", false),
     ] {
@@ -402,11 +396,16 @@ fn smoke_certificates(n: &mut Network, document: &mut Text<12288>) -> bool {
             return false;
         }
         if expected {
+            let links = crate::web::links(url, n.body.str());
+            if links.len() != 1 || links[0].url.str() != "https://10.0.2.2:8443/?view=2&mode=read" {
+                unsafe { hardware::log(b"KreativeOS: TLS CHECK FAILED - page link\r\n") };
+                return false;
+            }
             *document = n.body;
         }
         unsafe {
             hardware::log(if expected {
-                b"KreativeOS: HTTPS positive PASS\r\n"
+                b"KreativeOS: HTTP redirect, HTTPS gzip and page link PASS\r\n"
             } else {
                 b"KreativeOS: HTTPS rejection PASS\r\n"
             })

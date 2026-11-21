@@ -21,7 +21,7 @@ jobs:
           printf 'deb https://archive.ubuntu.com/ubuntu noble main universe\ndeb https://archive.ubuntu.com/ubuntu noble-updates main universe\n' > "$RUNNER_TEMP/kreative-apt.list"
           sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/kreative-apt.list" -o Dir::Etc::sourceparts=- -o Acquire::https::Timeout=20 update -qq
           sudo apt-get -o Dir::Etc::sourcelist="$RUNNER_TEMP/kreative-apt.list" -o Dir::Etc::sourceparts=- -o Acquire::https::Timeout=20 install -y --no-install-recommends qemu-system-x86 ovmf
-      - name: Boot once and capture desktop
+      - name: Verify headless boot and NVMe
         run: STORAGE=nvme python3 scripts/smoke.py
       - name: Verify HTTPS over Intel Ethernet and certificate rejection
         run: NIC_MODEL=e1000e python3 scripts/tls_check.py
@@ -38,7 +38,6 @@ jobs:
             build/KreativeOS-exfat.img
             build/esp/EFI/BOOT/BOOTX64.EFI
             build/SHA256SUMS
-            build/desktop.png
             build/serial.log
             build/tls-check.log
       - name: Upload formatted Rust source
