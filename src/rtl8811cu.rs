@@ -12,6 +12,13 @@ const TX_DESCRIPTOR: usize = 48;
 const CHUNK: usize = 4096;
 const DDMA_CONTROL: u16 = 0x1208;
 const DDMA_BUSY: u32 = 1 << 31;
+const EFUSE_CONTROL: u16 = 0x0030;
+const EFUSE_READY: u32 = 1 << 31;
+const EFUSE_MAP_BYTES: usize = 512;
+const EFUSE_PROGRAMMED_BYTES: usize = 512 - 96;
+const FEATURE_MAILBOX: u16 = 0x01a0;
+const FEATURE_REQUEST: u32 = 0xfd;
+const FEATURE_REPORT: u32 = 0x19;
 
 pub static mut FIRMWARE: [u8; 256 * 1024] = [0; 256 * 1024];
 pub static mut FIRMWARE_LEN: usize = 0;
@@ -79,7 +86,85 @@ pub enum Probe {
     RegisterUnavailable,
     FirmwareMissing(u8),
     FirmwareFailed(u8, &'static str),
-    FirmwareRunning(u8, u16, u8),
+    FirmwareRunning {
+        cut: u8,
+        version: u16,
+        revision: u8,
+        board: Result<Board>,
+        capabilities: Result<Capabilities>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub struct Board {
+    radio_front_end: u8,
+    channel_plan: u8,
+    crystal_trim: u8,
+    country: Option<[u8; 2]>,
+}
+
+#[derive(Clone, Copy)]
+pub struct Capabilities {
+    bandwidth: u8,
+    antennas: u8,
+}
+
+fn decode_efuse(read: impl FnMut(usize) -> Result<u8>) -> Result<[u8; EFUSE_MAP_BYTES]> {
+    let mut map = [u8::MAX; EFUSE_MAP_BYTES];
+    let mut bytes = (0..EFUSE_PROGRAMMED_BYTES).map(read);
+    while let Some(first) = bytes.next().transpose()? {
+        if first == u8::MAX {
+            break;
+        }
+        let (block, word_mask) = if first & 0x1f == 0x0f {
+            let second = bytes
+                .next()
+                .ok_or("eFuse header crosses protected area")??;
+            if second == u8::MAX {
+                break;
+            }
+            ((second >> 4) << 3 | (first >> 5), second & 0x0f)
+        } else {
+            (first >> 4, first & 0x0f)
+        };
+        if word_mask == 0x0f {
+            continue;
+        }
+        let start = usize::from(block) * 8;
+        let words = map
+            .get_mut(start..start + 8)
+            .ok_or("eFuse block outside logical map")?;
+        for (word, pair) in words.chunks_exact_mut(2).enumerate() {
+            if word_mask & (1 << word) == 0 {
+                for byte in pair {
+                    *byte = bytes
+                        .next()
+                        .ok_or("eFuse record crosses protected area")??;
+                }
+            }
+        }
+    }
+    Ok(map)
+}
+
+fn board_from_map(map: [u8; EFUSE_MAP_BYTES]) -> Result<Board> {
+    let station: [u8; 6] = map[0x107..0x10d].try_into().unwrap();
+    if station[0] & 1 != 0 || station == [0; 6] {
+        return Err("factory station address invalid");
+    }
+    let country = [map[0xcb], map[0xcc]];
+    if map[0xca] == u8::MAX {
+        return Err("factory radio profile missing");
+    }
+    Ok(Board {
+        radio_front_end: map[0xca] & 0x1f,
+        channel_plan: map[0xb8],
+        crystal_trim: map[0xb9],
+        country: country
+            .iter()
+            .all(u8::is_ascii_uppercase)
+            .then_some(country),
+    })
 }
 
 pub fn start(usb: &mut impl Usb) -> Probe {
@@ -99,8 +184,20 @@ pub fn start(usb: &mut impl Usb) -> Probe {
     else {
         return Probe::FirmwareFailed(cut, "unrecognized firmware image");
     };
-    match io.power_on().and_then(|_| io.download(&fw)) {
-        Ok(()) => Probe::FirmwareRunning(cut, fw.version, fw.revision),
+    let startup = (|| {
+        io.power_on()?;
+        // The 3081 firmware publishes capabilities as it starts when requested here.
+        io.write(FEATURE_MAILBOX, 1, FEATURE_REQUEST)?;
+        io.download(&fw)
+    })();
+    match startup {
+        Ok(()) => Probe::FirmwareRunning {
+            cut,
+            version: fw.version,
+            revision: fw.revision,
+            board: io.read_board(),
+            capabilities: io.read_capabilities(),
+        },
         Err(reason) => {
             let _ = io.cpu_enable(false);
             let _ = io.update(FW_CONTROL, 1, 1, 0);
@@ -152,15 +249,79 @@ impl<T: Usb> Registers<'_, T> {
         expected: u32,
         error: &'static str,
     ) -> Result {
+        self.wait_register(address, width, mask, expected, error)
+            .map(|_| ())
+    }
+    fn wait_register(
+        &mut self,
+        address: u16,
+        width: usize,
+        mask: u32,
+        expected: u32,
+        error: &'static str,
+    ) -> Result<u32> {
         let start = hardware::millis();
         loop {
-            if self.read(address, width)? & mask == expected {
-                return Ok(());
+            let value = self.read(address, width)?;
+            if value & mask == expected {
+                return Ok(value);
             }
             if hardware::millis().wrapping_sub(start) >= 250 {
                 return Err(error);
             }
         }
+    }
+    fn read_board(&mut self) -> Result<Board> {
+        let original_bank = self.read(0x0035, 1)? & 3;
+        self.update(0x0035, 1, 3, 0)?;
+        let result = (|| {
+            // Select the Wi-Fi bank and keep the programming LDO off.
+            self.update(0x0037, 1, 0x80, 0)?;
+            let initial = self.read(EFUSE_CONTROL, 4)? & !(EFUSE_READY | 0x3ffff);
+            let start = hardware::millis();
+            let map = decode_efuse(|address| {
+                if hardware::millis().wrapping_sub(start) >= 3000 {
+                    return Err("eFuse read budget expired");
+                }
+                self.write(EFUSE_CONTROL, 4, initial | ((address as u32) << 8))?;
+                let value = self.wait_register(
+                    EFUSE_CONTROL,
+                    4,
+                    EFUSE_READY,
+                    EFUSE_READY,
+                    "eFuse read timed out",
+                )?;
+                Ok(value as u8)
+            })?;
+            board_from_map(map)
+        })();
+        let restore = self.update(0x0035, 1, 3, original_bank);
+        let board = result?;
+        restore?;
+        Ok(board)
+    }
+    fn read_capabilities(&mut self) -> Result<Capabilities> {
+        self.poll(
+            FEATURE_MAILBOX,
+            1,
+            0xff,
+            FEATURE_REPORT,
+            "firmware capability report missing",
+        )?;
+        // The bandwidth and antenna fields share byte 6 of the event payload.
+        let value = self.read(FEATURE_MAILBOX + 2 + 6, 1)?;
+        self.write(FEATURE_MAILBOX, 1, 0)?;
+        if value == 0xff {
+            return Err("firmware capability report invalid");
+        }
+        Ok(Capabilities {
+            bandwidth: match value & 7 {
+                7 => 80,
+                6 => 40,
+                _ => 20,
+            },
+            antennas: ((value >> 5) & 7) as u8,
+        })
     }
     fn power_on(&mut self) -> Result {
         self.write(0x001c, 1, 0)?; // Unlock system control.
@@ -332,10 +493,51 @@ impl Probe {
             Self::FirmwareFailed(cut, error) => {
                 let _ = write!(text, " | cut {cut}, {error}");
             }
-            Self::FirmwareRunning(cut, version, revision) => {
+            Self::FirmwareRunning {
+                cut,
+                version,
+                revision,
+                board,
+                capabilities,
+            } => {
                 let _ = write!(text, " | cut {cut}, firmware {version}.{revision} started");
+                if let Err(error) = board {
+                    let _ = write!(text, " | {error}");
+                } else if capabilities.is_err() {
+                    text.append(" | capabilities unavailable");
+                } else {
+                    text.append(" | board data read");
+                }
             }
             Self::RegisterUnavailable => text.append(" | register read failed"),
+        }
+    }
+    pub fn board_details(self, text: &mut Text<128>) {
+        if let Self::FirmwareRunning {
+            board: Ok(board),
+            capabilities,
+            ..
+        } = self
+        {
+            let _ = write!(
+                text,
+                "RTL8811CU board: RFE {}, channel plan {:#04x}, crystal trim {:#04x}",
+                board.radio_front_end, board.channel_plan, board.crystal_trim
+            );
+            if let Some(country) = board.country {
+                let _ = write!(
+                    text,
+                    ", country {}{}",
+                    char::from(country[0]),
+                    char::from(country[1])
+                );
+            }
+            if let Ok(caps) = capabilities {
+                let _ = write!(text, ", {} MHz", caps.bandwidth);
+                if caps.antennas != 0 {
+                    let _ = write!(text, ", {} antennas", caps.antennas);
+                }
+            }
         }
     }
 }

@@ -127,6 +127,16 @@ impl Center {
             network.adapter_name(),
             self.devices.len()
         );
+        if let Some(radio) = crate::usb::rtl8811cu() {
+            let mut line = Text::new();
+            radio.describe(&mut line);
+            let _ = writeln!(report, "{}", line.str());
+            line.clear();
+            radio.board_details(&mut line);
+            if line.len != 0 {
+                let _ = writeln!(report, "{}", line.str());
+            }
+        }
         for device in &self.devices {
             if 2048 - report.len < device.len + 1 + 24 {
                 report.append("More devices in PCI view\n");

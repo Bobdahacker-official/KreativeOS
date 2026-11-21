@@ -611,6 +611,13 @@ impl Host {
             hardware::log(b"KreativeOS: ");
             hardware::log(line.str().as_bytes());
             hardware::log(b"\r\n");
+            line.clear();
+            detection.board_details(&mut line);
+            if line.len != 0 {
+                hardware::log(b"KreativeOS: ");
+                hardware::log(line.str().as_bytes());
+                hardware::log(b"\r\n");
+            }
         }
         let mut i = 0;
         while i < device.endpoints.len() {
