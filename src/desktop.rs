@@ -349,6 +349,8 @@ struct Desktop {
     ethernet_tab: bool,
     access_points: alloc::vec::Vec<crate::wifi::AccessPoint>,
     scanning_results: bool,
+    native_scan_pending: bool,
+    native_scan_results: bool,
     access_point_offset: usize,
     saved_wifi: alloc::vec::Vec<Text<384>>,
     saved_wifi_view: bool,
@@ -451,6 +453,8 @@ impl Desktop {
             wifi_status: "ESP-AT on COM2",
             access_points: alloc::vec::Vec::new(),
             scanning_results: false,
+            native_scan_pending: false,
+            native_scan_results: false,
             access_point_offset: 0,
             saved_wifi: read_urls("WiFi.networks"),
             saved_wifi_view: false,
@@ -1061,10 +1065,20 @@ impl Desktop {
         self.alert(self.wifi_status);
     }
     fn scan_wifi(&mut self, n: &mut Network) {
+        if self.native_scan_pending {
+            return;
+        }
         self.access_point_offset = 0;
         self.saved_wifi_view = false;
         self.scanning_results = true;
         self.access_points.clear();
+        self.native_scan_results = false;
+        if !n.wifi.joined && crate::usb::rtl8811cu().is_some() {
+            self.native_scan_pending = true;
+            self.native_scan_results = true;
+            self.wifi_status = "Listening on 2.4 GHz channels...";
+            return;
+        }
         match n.wifi.scan() {
             Ok(points) => {
                 self.wifi_status = if points.is_empty() {
@@ -1081,6 +1095,7 @@ impl Desktop {
         self.access_point_offset = 0;
         self.scanning_results = true;
         self.saved_wifi_view = true;
+        self.native_scan_results = false;
         self.access_points = self
             .saved_wifi
             .iter()
@@ -1431,6 +1446,10 @@ impl Desktop {
         }
     }
     fn select_access_point(&mut self, index: usize) {
+        if self.native_scan_results {
+            self.wifi_status = "Native Realtek scan results are read-only";
+            return;
+        }
         if let Some(point) = self.access_points.get(index) {
             self.wifi_ssid = point.ssid;
             self.wifi_pass.bytes.fill(0);
@@ -3241,6 +3260,8 @@ impl Desktop {
                         };
                         if self.saved_wifi_view {
                             label.set(point.ssid.str());
+                        } else if point.signal == i16::MIN {
+                            let _ = write!(label, "{}   {}", point.ssid.str(), security);
                         } else {
                             let _ = write!(
                                 label,
@@ -3619,6 +3640,23 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
         crate::system1::tick(hardware::millis());
         dirty |= desktop.scheduler.step(&mut desktop.terminal);
         network.poll();
+        if desktop.native_scan_pending {
+            desktop.native_scan_pending = false;
+            desktop.draw(&mut s, &network);
+            s.present();
+            match crate::usb::scan_rtl8811cu() {
+                Ok(points) => {
+                    desktop.wifi_status = if points.is_empty() {
+                        "No visible 2.4 GHz networks found"
+                    } else {
+                        "Nearby 2.4 GHz networks"
+                    };
+                    desktop.access_points = points;
+                }
+                Err(error) => desktop.wifi_status = error,
+            }
+            dirty = true;
+        }
         if network.tls_pending {
             desktop.draw(&mut s, &network);
             s.present();

@@ -1,7 +1,12 @@
 //! USB register access and RTL8821C firmware startup for the RTL8811CU.
-use crate::{hardware, text::Text};
+use crate::{hardware, text::Text, wifi::AccessPoint};
+use alloc::vec::Vec;
 use core::fmt::Write;
 use sha2::{Digest, Sha256};
+
+#[path = "rtl8811cu_scan.rs"]
+mod scan;
+pub use scan::passive_scan;
 
 pub const VENDOR: u16 = 0x0bda;
 pub const PRODUCT: u16 = 0xc811;
@@ -31,6 +36,9 @@ const FIRMWARE_SHA256: [u8; 32] = [
 pub trait Usb {
     fn control(&mut self, setup: [u8; 8], data: &mut [u8]) -> bool;
     fn bulk_out(&mut self, data: &[u8]) -> bool;
+    fn receive(&mut self, _data: &mut [u8]) -> Result<Option<usize>> {
+        Err("USB radio receive unavailable")
+    }
 }
 
 type Result<T = ()> = core::result::Result<T, &'static str>;
@@ -100,6 +108,7 @@ pub struct Board {
     radio_front_end: u8,
     channel_plan: u8,
     crystal_trim: u8,
+    package: u8,
     country: Option<[u8; 2]>,
 }
 
@@ -160,6 +169,7 @@ fn board_from_map(map: [u8; EFUSE_MAP_BYTES]) -> Result<Board> {
         radio_front_end: map[0xca] & 0x1f,
         channel_plan: map[0xb8],
         crystal_trim: map[0xb9],
+        package: (map[0xca] >> 5) & 1,
         country: country
             .iter()
             .all(u8::is_ascii_uppercase)

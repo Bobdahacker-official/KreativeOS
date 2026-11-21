@@ -125,6 +125,11 @@ if source_dir:
     developer_cluster = allocate(developer)
     slot = next(pos for pos in range(root_pos + 32, root_pos + 160, 32) if not image[pos])
     image[slot:slot+32] = entry('DEVELOP KDP', 32, developer_cluster, len(developer))
+phy_license = (ROOT / 'assets/rtl8821c-phy.LICENSE').read_bytes()
+license_cluster = allocate(phy_license)
+slot = next(pos for pos in range(root_pos + 32, root_pos + root_sectors * sector, 32)
+            if not image[pos])
+image[slot:slot+32] = entry('RTPHY   LIC', 32, license_cluster, len(phy_license))
 for i in range(2):
     pos = base + (reserved + i * fat_sectors) * sector
     image[pos:pos+len(fat)] = fat

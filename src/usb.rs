@@ -21,7 +21,7 @@ pub static mut DMA: usize = 0;
 static mut HOSTS: Vec<Host> = Vec::new();
 static mut EVENTS: VecDeque<Event> = VecDeque::new();
 static mut POINTER_ACTIVE: bool = false;
-static mut RTL8811CU: Option<crate::rtl8811cu::Probe> = None;
+const RADIO_RX_BYTES: usize = PAGE;
 const IOC: u32 = 1 << 5;
 const IDT: u32 = 1 << 6;
 const FINISHED: u8 = 1;
@@ -137,6 +137,76 @@ impl crate::rtl8811cu::Usb for RadioUsb<'_> {
                 == Some(data.len())
         }
     }
+    fn receive(&mut self, data: &mut [u8]) -> Result<Option<usize>, &'static str> {
+        if data.len() < RADIO_RX_BYTES {
+            return Err("RTL8811CU USB receive buffer is too small");
+        }
+        let endpoint = self
+            .device
+            .endpoints
+            .iter_mut()
+            .find(|ep| ep.kind == Kind::RadioIn)
+            .ok_or("RTL8811CU USB receive endpoint unavailable")?;
+        let buffer = self.device.area + 10 * PAGE;
+        if endpoint.pending == 0 && self.device.radio_received.is_none() {
+            endpoint.pending = unsafe {
+                endpoint.ring.push(trb(
+                    buffer,
+                    RADIO_RX_BYTES as u32,
+                    (1 << 10) | IOC | (1 << 2),
+                ))
+            };
+            fence(Ordering::SeqCst);
+            unsafe {
+                wr(
+                    self.host.bells,
+                    usize::from(self.device.slot) * 4,
+                    u32::from(endpoint.dci),
+                )
+            };
+        }
+        let start = hardware::millis();
+        while self.device.radio_received.is_none() {
+            if hardware::millis().wrapping_sub(start) >= 5 {
+                return Ok(None);
+            }
+            if let Some(event) = unsafe { self.host.event() } {
+                if !Self::consume_radio_event(self.device, event) {
+                    unsafe { self.host.handle(event) };
+                }
+            } else {
+                core::hint::spin_loop();
+            }
+        }
+        let len = self.device.radio_received.take().unwrap()?;
+        fence(Ordering::Acquire);
+        unsafe { ptr::copy_nonoverlapping(buffer as *const u8, data.as_mut_ptr(), len) };
+        Ok(Some(len))
+    }
+}
+impl RadioUsb<'_> {
+    fn consume_radio_event(device: &mut Device, event: Trb) -> bool {
+        if (event[3] >> 10) & 63 != 32 || (event[3] >> 24) as u8 != device.slot {
+            return false;
+        }
+        let dci = ((event[3] >> 16) & 31) as u8;
+        let address = (u64::from(event[1]) << 32 | u64::from(event[0])) as usize;
+        let Some(endpoint) = device.endpoints.iter_mut().find(|ep| {
+            ep.kind == Kind::RadioIn && ep.dci == dci && ep.pending != 0 && ep.pending == address
+        }) else {
+            return false;
+        };
+        endpoint.pending = 0;
+        let code = (event[2] >> 24) as u8;
+        device.radio_received = Some(if matches!(code, FINISHED | SHORT) {
+            RADIO_RX_BYTES
+                .checked_sub((event[2] & 0x00ff_ffff) as usize)
+                .ok_or("Invalid RTL8811CU USB transfer length")
+        } else {
+            Err("RTL8811CU USB receive endpoint stopped")
+        });
+        true
+    }
 }
 struct Endpoint {
     dci: u8,
@@ -156,6 +226,8 @@ struct Device {
     ep0: Ring,
     endpoints: Vec<Endpoint>,
     storage: bool,
+    radio: Option<(crate::rtl8811cu::Probe, bool)>,
+    radio_received: Option<Result<usize, &'static str>>,
 }
 struct Host {
     op: usize,
@@ -293,6 +365,9 @@ impl Host {
         let Some(device) = self.devices.iter_mut().find(|device| device.slot == slot) else {
             return;
         };
+        if RadioUsb::consume_radio_event(device, data) {
+            return;
+        }
         let Some(ep) = device.endpoints.iter_mut().find(|ep| {
             ep.dci == dci
                 && ep.pending == address
@@ -435,6 +510,8 @@ impl Host {
             ep0: Ring::new(area + 2 * PAGE),
             endpoints: Vec::new(),
             storage: false,
+            radio: None,
+            radio_received: None,
         };
         let address = area + 7 * PAGE;
         if !self.control(&mut device, [0x80, 6, 0, 1, 0, 0, 8, 0]) {
@@ -605,7 +682,7 @@ impl Host {
                 host: self,
                 device: &mut device,
             });
-            RTL8811CU = Some(detection);
+            device.radio = Some((detection, false));
             let mut line = Text::new();
             detection.describe(&mut line);
             hardware::log(b"KreativeOS: ");
@@ -833,7 +910,44 @@ pub fn poll() -> Option<Event> {
 }
 
 pub fn rtl8811cu() -> Option<crate::rtl8811cu::Probe> {
-    unsafe { RTL8811CU }
+    unsafe {
+        HOSTS
+            .iter()
+            .flat_map(|host| host.devices.iter())
+            .find_map(|device| device.radio.map(|(probe, _)| probe))
+    }
+}
+
+pub fn scan_rtl8811cu() -> Result<Vec<crate::wifi::AccessPoint>, &'static str> {
+    unsafe {
+        for host in &mut HOSTS {
+            let Some(index) = host.devices.iter().position(|device| {
+                matches!(
+                    device.radio,
+                    Some((
+                        crate::rtl8811cu::Probe::FirmwareRunning { board: Ok(_), .. },
+                        _
+                    ))
+                )
+            }) else {
+                continue;
+            };
+            let mut device = host.devices.remove(index);
+            let (status, mut initialized) = device.radio.unwrap();
+            let result = crate::rtl8811cu::passive_scan(
+                &mut RadioUsb {
+                    host,
+                    device: &mut device,
+                },
+                status,
+                &mut initialized,
+            );
+            device.radio = Some((status, initialized));
+            host.devices.insert(index, device);
+            return result;
+        }
+    }
+    Err("Native Realtek scan requires firmware and factory board data")
 }
 
 pub struct Disk {
