@@ -49,6 +49,7 @@ pub struct Network {
     next_hop: Address,
     io: u16,
     pci_adapter: Option<PciAdapter>,
+    wired_mac: Option<[u8; 6]>,
     pub wifi: crate::wifi::Module,
     pub response: Option<crate::web::Response>,
     pub mac: [u8; 6],
@@ -166,6 +167,7 @@ impl Network {
             response: None,
             http_bytes: Vec::new(),
             pci_adapter: None,
+            wired_mac: None,
             mac: [0; 6],
             received: 0,
             sent: 0,
@@ -284,6 +286,9 @@ impl Network {
         n
     }
     pub fn adapter_name(&self) -> &'static str {
+        if self.native_wifi() {
+            return "Realtek RTL8811CU Wi-Fi";
+        }
         if let Some(adapter) = &self.pci_adapter {
             adapter.name()
         } else if self.io != 0 {
@@ -293,9 +298,12 @@ impl Network {
         }
     }
     pub fn online(&self) -> bool {
-        self.io != 0 || self.pci_adapter.is_some()
+        self.native_wifi() || self.io != 0 || self.pci_adapter.is_some()
     }
     pub fn link_speed(&self) -> Option<u16> {
+        if self.native_wifi() {
+            return crate::usb::native_rate();
+        }
         if let Some(adapter) = &self.pci_adapter {
             adapter.link_speed()
         } else if self.io != 0 {
@@ -307,6 +315,55 @@ impl Network {
             }
         } else {
             None
+        }
+    }
+    pub fn native_wifi(&self) -> bool {
+        self.wired_mac.is_some()
+    }
+    pub fn join_native(&mut self, ssid: &str, pass: &str) -> Result<(), &'static str> {
+        self.clear_browser_session();
+        if self.wifi.active {
+            self.wifi.close();
+        }
+        let mac = match crate::usb::join_rtl8811cu(ssid, pass) {
+            Ok(mac) => mac,
+            Err(error) => {
+                self.restore_wired();
+                return Err(error);
+            }
+        };
+        if self.wired_mac.is_none() {
+            self.wired_mac = Some(self.mac);
+        }
+        self.mac = mac;
+        self.link_up = false;
+        self.start_dhcp(0);
+        self.status = "Native Wi-Fi connected. Looking for an IPv4 lease.";
+        Ok(())
+    }
+    pub fn disconnect_native(&mut self) {
+        if self.native_wifi() {
+            self.clear_browser_session();
+            crate::usb::native_disconnect();
+            self.restore_wired();
+            self.status = "Native Wi-Fi disconnected";
+        }
+    }
+    fn restore_wired(&mut self) {
+        if let Some(mac) = self.wired_mac.take() {
+            self.mac = mac;
+            self.state = 0;
+            self.raw.clear();
+            self.raw_eof = false;
+            self.raw_waiting = false;
+            self.tls_pending = false;
+            self.link_up = false;
+            self.config = Config::UNCONFIGURED;
+            self.dhcp = None;
+            self.lease = None;
+            self.neighbors.fill(None);
+            self.changed = true;
+            crate::ethernet::configure_at_boot(self);
         }
     }
     pub fn static_config(&mut self, config: Config, vlan: u16) -> bool {
@@ -542,6 +599,13 @@ impl Network {
         if !self.online() || frame.len() > 1536 {
             return;
         }
+        if self.native_wifi() {
+            if crate::usb::native_transmit(frame) {
+                self.sent += 1;
+                self.sent_bytes += frame.len() as u64;
+            }
+            return;
+        }
         if let Some(adapter) = &mut self.pci_adapter {
             if adapter.transmit(frame) {
                 self.sent += 1;
@@ -748,7 +812,7 @@ impl Network {
             self.path.set("/");
         }
         self.path.append(path);
-        if self.wifi.joined && self.secure {
+        if self.wifi.joined && self.secure && !self.native_wifi() {
             self.status = "Connecting over Wi-Fi";
             if self.wifi.connect(host, self.remote_port).is_ok() {
                 self.state = 6;
@@ -814,6 +878,12 @@ impl Network {
         }
     }
     pub fn poll(&mut self) {
+        if self.native_wifi() {
+            if let Err(error) = crate::usb::native_service() {
+                self.restore_wired();
+                self.fail(error);
+            }
+        }
         if !self.online() {
             return;
         }
@@ -834,7 +904,12 @@ impl Network {
         }
         for _ in 0..16 {
             let mut f = [0u8; 1536];
-            let len = if let Some(adapter) = &mut self.pci_adapter {
+            let len = if self.native_wifi() {
+                let Some(len) = crate::usb::native_receive(&mut f) else {
+                    break;
+                };
+                len
+            } else if let Some(adapter) = &mut self.pci_adapter {
                 let Some(len) = adapter.receive(&mut f) else {
                     break;
                 };

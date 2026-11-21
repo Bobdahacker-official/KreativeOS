@@ -342,15 +342,16 @@ struct Desktop {
     web_list_offset: usize,
     native_wifi: crate::ax210::Status,
     wifi_ssid: Text<32>,
-    wifi_pass: Text<63>,
+    wifi_pass: Text<64>,
     wifi_password_field: bool,
+    wifi_requires_password: bool,
     wifi_status: &'static str,
     ethernet: crate::ethernet::Editor,
     ethernet_tab: bool,
     access_points: alloc::vec::Vec<crate::wifi::AccessPoint>,
     scanning_results: bool,
     native_scan_pending: bool,
-    native_scan_results: bool,
+    native_join_pending: bool,
     access_point_offset: usize,
     saved_wifi: alloc::vec::Vec<Text<384>>,
     saved_wifi_view: bool,
@@ -450,11 +451,16 @@ impl Desktop {
             wifi_ssid: Text::new(),
             wifi_pass: Text::new(),
             wifi_password_field: false,
-            wifi_status: "ESP-AT on COM2",
+            wifi_requires_password: false,
+            wifi_status: if crate::usb::rtl8811cu().is_some() {
+                "Realtek RTL8811CU detected"
+            } else {
+                "ESP-AT on COM2"
+            },
             access_points: alloc::vec::Vec::new(),
             scanning_results: false,
             native_scan_pending: false,
-            native_scan_results: false,
+            native_join_pending: false,
             access_point_offset: 0,
             saved_wifi: read_urls("WiFi.networks"),
             saved_wifi_view: false,
@@ -1048,6 +1054,16 @@ impl Desktop {
         }
     }
     fn join_wifi(&mut self, n: &mut Network) {
+        if n.native_wifi() || (!n.wifi.joined && crate::usb::rtl8811cu().is_some()) {
+            if self.wifi_requires_password && self.wifi_pass.len == 0 {
+                self.wifi_status = "Enter the password for this secured network";
+                self.wifi_password_field = true;
+                return;
+            }
+            self.native_join_pending = true;
+            self.wifi_status = "Connecting with the Realtek adapter...";
+            return;
+        }
         self.wifi_status = match n.wifi.join(self.wifi_ssid.str(), self.wifi_pass.str()) {
             Ok(()) => {
                 self.saved_wifi
@@ -1072,10 +1088,8 @@ impl Desktop {
         self.saved_wifi_view = false;
         self.scanning_results = true;
         self.access_points.clear();
-        self.native_scan_results = false;
         if !n.wifi.joined && crate::usb::rtl8811cu().is_some() {
             self.native_scan_pending = true;
-            self.native_scan_results = true;
             self.wifi_status = "Listening on 2.4 GHz channels...";
             return;
         }
@@ -1095,7 +1109,6 @@ impl Desktop {
         self.access_point_offset = 0;
         self.scanning_results = true;
         self.saved_wifi_view = true;
-        self.native_scan_results = false;
         self.access_points = self
             .saved_wifi
             .iter()
@@ -1421,6 +1434,7 @@ impl Desktop {
                         self.wifi_pass.pop();
                     } else {
                         self.wifi_ssid.pop();
+                        self.wifi_requires_password = false;
                     }
                 }
                 32..=126 => {
@@ -1428,6 +1442,7 @@ impl Desktop {
                         self.wifi_pass.push(key);
                     } else {
                         self.wifi_ssid.push(key);
+                        self.wifi_requires_password = false;
                     }
                 }
                 _ => {}
@@ -1446,12 +1461,9 @@ impl Desktop {
         }
     }
     fn select_access_point(&mut self, index: usize) {
-        if self.native_scan_results {
-            self.wifi_status = "Native Realtek scan results are read-only";
-            return;
-        }
         if let Some(point) = self.access_points.get(index) {
             self.wifi_ssid = point.ssid;
+            self.wifi_requires_password = !self.saved_wifi_view && point.security != 0;
             self.wifi_pass.bytes.fill(0);
             self.wifi_pass.clear();
             self.wifi_password_field = true;
@@ -2383,11 +2395,15 @@ impl Desktop {
                     } else if (148..258).contains(&x) {
                         self.view_saved_wifi();
                     } else if (268..378).contains(&x) {
-                        self.wifi_status = n
-                            .wifi
-                            .disconnect()
-                            .map(|()| "Wi-Fi disconnected")
-                            .unwrap_or_else(|error| error);
+                        self.wifi_status = if n.native_wifi() {
+                            n.disconnect_native();
+                            "Native Wi-Fi disconnected"
+                        } else {
+                            n.wifi
+                                .disconnect()
+                                .map(|()| "Wi-Fi disconnected")
+                                .unwrap_or_else(|error| error)
+                        };
                         self.alert(self.wifi_status);
                     }
                 } else if (378..413).contains(&y) {
@@ -2552,7 +2568,7 @@ impl Desktop {
             dock.status.y + 17,
             dock.status.w,
             17,
-            if n.wifi.joined {
+            if n.wifi.joined || n.native_wifi() {
                 "Wi-Fi"
             } else if n.link_speed().is_some() && n.config.ip != [0; 4] {
                 "Ethernet"
@@ -3287,16 +3303,20 @@ impl Desktop {
                 }
                 button(s, x + 254, y + 46, 112, "Scan Wi-Fi", SURFACE);
                 let mut status: Text<128> = Text::new();
-                let _ = write!(
-                    status,
-                    "Ethernet: {}   |   Wi-Fi: {}",
-                    n.adapter_name(),
-                    if n.wifi.joined {
-                        "connected"
-                    } else {
-                        "disconnected"
-                    }
-                );
+                if n.native_wifi() {
+                    status.set("Realtek RTL8811CU connected");
+                } else {
+                    let _ = write!(
+                        status,
+                        "Ethernet: {}   |   Wi-Fi: {}",
+                        n.adapter_name(),
+                        if n.wifi.joined {
+                            "connected"
+                        } else {
+                            "disconnected"
+                        }
+                    );
+                }
                 s.text(x + 24, y + 92, status.str(), MUTED, 1);
                 s.text(x + 24, y + 126, "Join Wi-Fi", self.accent, 2);
                 s.text(x + 24, y + 154, "Network name", INK, 1);
@@ -3339,7 +3359,15 @@ impl Desktop {
                 s.text(
                     x + 24,
                     y + 335,
-                    clip_label(self.wifi_status, w - 48, 1),
+                    clip_label(
+                        if n.native_wifi() {
+                            n.ethernet_status
+                        } else {
+                            self.wifi_status
+                        },
+                        w - 48,
+                        1,
+                    ),
                     MUTED,
                     1,
                 );
@@ -3612,6 +3640,8 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
                     }
                 }
                 if (desktop.users.current(), desktop.users.system()) != previous_account {
+                    desktop.wifi_pass.bytes.fill(0);
+                    desktop.wifi_pass.clear();
                     crate::audio::stop();
                     desktop.scheduler.clear();
                     network.clear_browser_session();
@@ -3639,7 +3669,33 @@ pub fn run(mut s: Screen, mut network: Network) -> ! {
         desktop.checkpoint_draft(false);
         crate::system1::tick(hardware::millis());
         dirty |= desktop.scheduler.step(&mut desktop.terminal);
+        let was_native_wifi = network.native_wifi();
         network.poll();
+        if was_native_wifi && !network.native_wifi() {
+            desktop.wifi_status = network.status;
+            desktop.alert(network.status);
+            dirty = true;
+        }
+        if desktop.native_join_pending {
+            desktop.native_join_pending = false;
+            desktop.draw(&mut s, &network);
+            s.present();
+            match network.join_native(desktop.wifi_ssid.str(), desktop.wifi_pass.str()) {
+                Ok(()) => {
+                    let mut name = Text::new();
+                    name.set(desktop.wifi_ssid.str());
+                    desktop.saved_wifi.retain(|entry| entry.str() != name.str());
+                    desktop.saved_wifi.insert(0, name);
+                    save_urls("WiFi.networks", &mut desktop.saved_wifi);
+                    desktop.wifi_status = network.status;
+                }
+                Err(error) => desktop.wifi_status = error,
+            }
+            desktop.wifi_pass.bytes.fill(0);
+            desktop.wifi_pass.clear();
+            desktop.alert(desktop.wifi_status);
+            dirty = true;
+        }
         if desktop.native_scan_pending {
             desktop.native_scan_pending = false;
             desktop.draw(&mut s, &network);

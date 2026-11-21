@@ -102,6 +102,7 @@ enum Kind {
 struct RadioUsb<'a> {
     host: &'a mut Host,
     device: &'a mut Device,
+    wait_rx: bool,
 }
 impl crate::rtl8811cu::Usb for RadioUsb<'_> {
     fn control(&mut self, setup: [u8; 8], data: &mut [u8]) -> bool {
@@ -174,8 +175,10 @@ impl crate::rtl8811cu::Usb for RadioUsb<'_> {
                 if !Self::consume_radio_event(self.device, event) {
                     unsafe { self.host.handle(event) };
                 }
-            } else {
+            } else if self.wait_rx {
                 core::hint::spin_loop();
+            } else {
+                return Ok(None);
             }
         }
         let len = self.device.radio_received.take().unwrap()?;
@@ -228,6 +231,7 @@ struct Device {
     storage: bool,
     radio: Option<(crate::rtl8811cu::Probe, bool)>,
     radio_received: Option<Result<usize, &'static str>>,
+    station: Option<crate::rtl8811cu::Station>,
 }
 struct Host {
     op: usize,
@@ -512,6 +516,7 @@ impl Host {
             storage: false,
             radio: None,
             radio_received: None,
+            station: None,
         };
         let address = area + 7 * PAGE;
         if !self.control(&mut device, [0x80, 6, 0, 1, 0, 0, 8, 0]) {
@@ -681,6 +686,7 @@ impl Host {
             let detection = crate::rtl8811cu::start(&mut RadioUsb {
                 host: self,
                 device: &mut device,
+                wait_rx: true,
             });
             device.radio = Some((detection, false));
             let mut line = Text::new();
@@ -919,35 +925,115 @@ pub fn rtl8811cu() -> Option<crate::rtl8811cu::Probe> {
 }
 
 pub fn scan_rtl8811cu() -> Result<Vec<crate::wifi::AccessPoint>, &'static str> {
+    with_radio(false, true, |radio| {
+        if radio.device.station.is_some() {
+            return Err("Disconnect native Wi-Fi before scanning");
+        }
+        let (status, mut initialized) = radio.device.radio.unwrap();
+        let result = crate::rtl8811cu::passive_scan(radio, status, &mut initialized);
+        radio.device.radio = Some((status, initialized));
+        result
+    })
+}
+
+fn with_radio<T>(
+    connected: bool,
+    wait_rx: bool,
+    action: impl FnOnce(&mut RadioUsb<'_>) -> Result<T, &'static str>,
+) -> Result<T, &'static str> {
     unsafe {
         for host in &mut HOSTS {
             let Some(index) = host.devices.iter().position(|device| {
-                matches!(
-                    device.radio,
-                    Some((
-                        crate::rtl8811cu::Probe::FirmwareRunning { board: Ok(_), .. },
-                        _
-                    ))
-                )
+                (!connected || device.station.is_some())
+                    && matches!(
+                        device.radio,
+                        Some((
+                            crate::rtl8811cu::Probe::FirmwareRunning { board: Ok(_), .. },
+                            _
+                        ))
+                    )
             }) else {
                 continue;
             };
             let mut device = host.devices.remove(index);
-            let (status, mut initialized) = device.radio.unwrap();
-            let result = crate::rtl8811cu::passive_scan(
-                &mut RadioUsb {
-                    host,
-                    device: &mut device,
-                },
-                status,
-                &mut initialized,
-            );
-            device.radio = Some((status, initialized));
+            let result = action(&mut RadioUsb {
+                host,
+                device: &mut device,
+                wait_rx,
+            });
             host.devices.insert(index, device);
             return result;
         }
     }
     Err("Native Realtek scan requires firmware and factory board data")
+}
+
+pub fn join_rtl8811cu(ssid: &str, pass: &str) -> Result<[u8; 6], &'static str> {
+    with_radio(false, true, |radio| {
+        if let Some(mut station) = radio.device.station.take() {
+            crate::rtl8811cu::stop(radio, &mut station);
+        }
+        let (status, mut initialized) = radio.device.radio.unwrap();
+        let result = crate::rtl8811cu::join(radio, status, &mut initialized, ssid, pass);
+        radio.device.radio = Some((status, initialized));
+        let station = result?;
+        let mac = station.mac;
+        radio.device.station = Some(station);
+        Ok(mac)
+    })
+}
+
+pub fn native_disconnect() {
+    let _ = with_radio(true, false, |radio| {
+        let mut station = radio.device.station.take().unwrap();
+        crate::rtl8811cu::stop(radio, &mut station);
+        Ok(())
+    });
+}
+
+pub fn native_service() -> Result<(), &'static str> {
+    with_radio(true, false, |radio| {
+        let mut station = radio.device.station.take().unwrap();
+        match station.service(radio) {
+            Ok(()) => {
+                radio.device.station = Some(station);
+                Ok(())
+            }
+            Err(error) => {
+                crate::rtl8811cu::stop(radio, &mut station);
+                Err(error)
+            }
+        }
+    })
+}
+
+pub fn native_receive(frame: &mut [u8]) -> Option<usize> {
+    unsafe {
+        HOSTS
+            .iter_mut()
+            .flat_map(|host| host.devices.iter_mut())
+            .find_map(|device| device.station.as_mut())
+            .and_then(|station| station.read_ethernet(frame))
+    }
+}
+
+pub fn native_rate() -> Option<u16> {
+    unsafe {
+        HOSTS
+            .iter()
+            .flat_map(|host| host.devices.iter())
+            .find_map(|device| device.station.as_ref().map(|station| station.rate_mbps()))
+    }
+}
+
+pub fn native_transmit(frame: &[u8]) -> bool {
+    with_radio(true, false, |radio| {
+        let mut station = radio.device.station.take().unwrap();
+        let result = station.write_ethernet(radio, frame);
+        radio.device.station = Some(station);
+        result
+    })
+    .is_ok()
 }
 
 pub struct Disk {

@@ -2,11 +2,11 @@
 use super::*;
 
 const TABLES: &[u8] = include_bytes!("../assets/rtl8821c-phy.bin");
-const RX_TRANSFER: usize = 4096;
+pub(super) const RX_TRANSFER: usize = 4096;
 const RX_DESCRIPTOR: usize = 24;
-const RX_ENABLE: u32 = (1 << 7) | (1 << 4) | (1 << 3) | (1 << 1);
-const TX_AND_RX: u32 = RX_ENABLE | (1 << 6) | (1 << 5) | (1 << 2) | 1;
-const SCAN_CHANNELS: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+pub(super) const RX_ENABLE: u32 = (1 << 7) | (1 << 4) | (1 << 3) | (1 << 1);
+pub(super) const TX_AND_RX: u32 = 0xff;
+pub(super) const SCAN_CHANNELS: [u8; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 pub fn passive_scan(
     usb: &mut impl Usb,
@@ -98,7 +98,7 @@ fn applicable_rows(table: &[u8], cut: u8, board: Board) -> impl Iterator<Item = 
 }
 
 impl<T: Usb> Registers<'_, T> {
-    fn setup_receiver(&mut self, cut: u8, board: Board) -> Result {
+    pub(super) fn setup_receiver(&mut self, cut: u8, board: Board) -> Result {
         if !matches!(board.radio_front_end, 0 | 2 | 4 | 6) {
             return Err("Unsupported RTL8811CU radio front-end profile");
         }
@@ -179,7 +179,7 @@ impl<T: Usb> Registers<'_, T> {
         self.write_rf(address, (old & !mask) | value)
     }
 
-    fn tune_20mhz(&mut self, channel: u8, board: Board) -> Result {
+    pub(super) fn tune_20mhz(&mut self, channel: u8, board: Board) -> Result {
         self.update(0x0808, 4, 1 << 28, 1 << 28)?;
         self.update(0x0454, 1, 1 << 7, 0)?;
         self.update(0x0a80, 4, 1 << 18, 0)?;
@@ -243,7 +243,11 @@ impl<T: Usb> Registers<'_, T> {
     }
 }
 
-fn usb_beacons(mut data: &[u8], channel: u8) -> impl Iterator<Item = AccessPoint> + '_ {
+fn usb_beacons(data: &[u8], channel: u8) -> impl Iterator<Item = AccessPoint> + '_ {
+    usb_frames(data).filter_map(move |(frame, signal)| beacon(frame, channel, signal))
+}
+
+pub(super) fn usb_frames(mut data: &[u8]) -> impl Iterator<Item = (&[u8], i16)> {
     core::iter::from_fn(move || loop {
         let header = data.get(..RX_DESCRIPTOR)?;
         let flags = u32::from_le_bytes(header[..4].try_into().ok()?);
@@ -264,14 +268,12 @@ fn usb_beacons(mut data: &[u8], channel: u8) -> impl Iterator<Item = AccessPoint
         data = data.get(next..).unwrap_or(&[]);
         // Firmware events, CRC errors and ICV errors are not 802.11 frames.
         if header[11] & 0x10 == 0 && flags & 0xc000 == 0 {
-            if let Some(point) = beacon(frame, channel, signal) {
-                return Some(point);
-            }
+            return Some((frame, signal));
         }
     })
 }
 
-fn beacon(frame: &[u8], channel: u8, signal: i16) -> Option<AccessPoint> {
+pub(super) fn beacon(frame: &[u8], channel: u8, signal: i16) -> Option<AccessPoint> {
     if frame.len() < 36 || frame[0] != 0x80 || frame[1] & 3 != 0 {
         return None;
     }
@@ -377,6 +379,10 @@ mod tests {
                 country: None,
                 crystal_trim: 0,
                 package: 0,
+                station_address: [2, 1, 2, 3, 4, 5],
+                cck_power: [20; 6],
+                ofdm_power: [20; 5],
+                ofdm_difference: Some(0),
             };
             let mac_rows: Vec<_> = applicable_rows(mac, 1, board).collect();
             assert!(mac_rows.len() > 64);

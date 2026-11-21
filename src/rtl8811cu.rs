@@ -7,6 +7,11 @@ use sha2::{Digest, Sha256};
 #[path = "rtl8811cu_scan.rs"]
 mod scan;
 pub use scan::passive_scan;
+#[path = "rtl8811cu_station.rs"]
+mod station;
+pub use station::{join, stop, Station};
+#[path = "rtl8811cu_wpa.rs"]
+mod wpa;
 
 pub const VENDOR: u16 = 0x0bda;
 pub const PRODUCT: u16 = 0xc811;
@@ -109,6 +114,10 @@ pub struct Board {
     channel_plan: u8,
     crystal_trim: u8,
     package: u8,
+    station_address: [u8; 6],
+    cck_power: [u8; 6],
+    ofdm_power: [u8; 5],
+    ofdm_difference: Option<i8>,
     country: Option<[u8; 2]>,
 }
 
@@ -165,11 +174,21 @@ fn board_from_map(map: [u8; EFUSE_MAP_BYTES]) -> Result<Board> {
     if map[0xca] == u8::MAX {
         return Err("factory radio profile missing");
     }
+    let power = if matches!(map[0xca] & 0x1f, 2 | 4) {
+        0x3a
+    } else {
+        0x10
+    };
+    let difference = map[power + 11];
     Ok(Board {
         radio_front_end: map[0xca] & 0x1f,
         channel_plan: map[0xb8],
         crystal_trim: map[0xb9],
         package: (map[0xca] >> 5) & 1,
+        station_address: station,
+        cck_power: map[power..power + 6].try_into().unwrap(),
+        ofdm_power: map[power + 6..power + 11].try_into().unwrap(),
+        ofdm_difference: (difference != u8::MAX).then_some(((difference << 4) as i8) >> 4),
         country: country
             .iter()
             .all(u8::is_ascii_uppercase)
