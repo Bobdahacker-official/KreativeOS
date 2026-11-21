@@ -890,6 +890,7 @@ fn hid_key(usage: u8, modifier: u8) -> Option<u8> {
             44 => 0xa2,
             53 => 0xaa,
             16 => 0xab,
+            22 => 0xac,
             30..=33 => 0xa3 + usage - 30,
             6 => 0xa7,
             25 => {

@@ -71,7 +71,9 @@ GitHub Actions compiles the Rust binary, boots the disk image in QEMU, and check
 - Settings with four wallpaper presets, color modes, saved accent and magnifier preferences, live system details, and restart confirmation.
 - The floating dock opens the app grid and the activity panel, which shows live memory use, file usage, network traffic and uptime.
 
-F1–F10 open Files through Settings. Escape toggles the launcher. Use the arrow keys and Enter to open an app from the grid. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save. In Browser, press Ctrl+L to clear the address, then type an address and press Enter. Use Up/Down to scroll. Snake uses arrow keys and Space to restart.
+F1–F10 open Files through Settings. Escape toggles the launcher. Use the arrow keys and Enter to open an app from the grid. Tab switches open windows. Drag the title bar to move a window. Use the controls on the right to minimize, maximize or restore, and close. In Notes, click Save or press Ctrl+S. In Browser, press Ctrl+L to clear the address, then type an address and press Enter. Use Up/Down to scroll. Snake uses arrow keys and Space to restart.
+
+On writable exFAT, Notes keeps one private recovery checkpoint per account, including standard accounts. The checkpoint supports nested filenames and notes up to the normal file limit. A successful save clears the checkpoint for that document. If a save fails, the edit stays open. Use `discard note` in Terminal to intentionally drop the open note's unsaved changes.
 
 ## Networking and hardware
 
@@ -115,7 +117,7 @@ Use `KreativeOS-exfat.img` as a dedicated virtual data disk. The combined USB im
 python scripts/exfat_image.py build/data-gpt-4kn.img --partition gpt --sector-size 4096
 ```
 
-Attach a 4Kn image to a virtual disk configured with 4,096-byte logical sectors. Use `mkdir Projects` and `mkdir Projects/Notes` to create folders, then open them in Files or use `edit Projects/Notes/report.txt` in Terminal. Use host tools to recover a dirty volume.
+Attach a 4Kn image to a virtual disk configured with 4,096-byte logical sectors. Use `mkdir Projects` and `mkdir Projects/Notes` to create folders, then open them in Files or use `edit Projects/Notes/report.txt` in Terminal. A structurally readable volume with a dirty or media-failure flag mounts read-only and can still be browsed after sign-in. Use host tools to repair the volume before writing again.
 
 To copy legacy files and accounts to a new SATA image while keeping the original image:
 

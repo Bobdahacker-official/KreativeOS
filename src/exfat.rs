@@ -3,6 +3,7 @@ use crate::storage::{self, File};
 use alloc::vec::Vec;
 
 pub const DRAFT: &str = "KOSDRAFT.KDR";
+pub const DRAFT_PREFIX: &str = "@draft-";
 const ROOT_LIMIT: usize = 4 * 1024 * 1024;
 const BITMAP_LIMIT: usize = 8 * 1024 * 1024;
 const EOC: u32 = 0xffff_fff8;
@@ -12,6 +13,7 @@ pub struct Geometry {
     pub start: u64,
     pub length: u64,
     pub sector: usize,
+    pub recovery: bool,
     spc: u32,
     fat: u32,
     heap: u32,
@@ -32,13 +34,14 @@ impl Geometry {
         }
         let mut boot = alloc::vec![0; sector];
         let mut expected = None;
+        let mut recovery = false;
         for copy in [start, start + 12] {
             if !read(copy, &mut boot)
                 || &boot[3..11] != b"EXFAT   "
                 || boot[11..64].iter().any(|&byte| byte != 0)
                 || (qword(&boot, 64) != 0 && qword(&boot, 64) != start)
                 || word(&boot, 104) != 0x100
-                || word(&boot, 106) & 7 != 0
+                || (copy == start && word(&boot, 106) & 1 != 0)
                 || boot[108] != sector.trailing_zeros() as u8
                 || boot[109] > 25 - boot[108]
                 || boot[110] != 1
@@ -46,10 +49,14 @@ impl Geometry {
             {
                 return None;
             }
+            if copy == start {
+                recovery = word(&boot, 106) & 6 != 0;
+            }
             let volume = Self {
                 start,
                 length: qword(&boot, 72),
                 sector,
+                recovery,
                 spc: 1 << boot[109],
                 fat: dword(&boot, 80),
                 heap: dword(&boot, 88),
@@ -246,7 +253,18 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| (32..127).contains(&b) && !b"\"*/:<>?\\|".contains(&b))
 }
 
+pub fn draft_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(DRAFT)
+        || name
+            .get(..DRAFT_PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(DRAFT_PREFIX))
+}
+
 impl Volume {
+    pub fn needs_recovery(&self) -> bool {
+        self.geometry.recovery || !self.healthy
+    }
+
     pub fn label(&self) -> crate::text::Text<11> {
         let mut label = crate::text::Text::new();
         if let Some(row) = self
@@ -426,8 +444,8 @@ impl Volume {
             {
                 return None;
             }
-            let max = if name.str().eq_ignore_ascii_case(DRAFT) {
-                4096
+            let max = if draft_name(name.str()) {
+                storage::DRAFT_CAP
             } else {
                 storage::CAP
             };
@@ -651,7 +669,7 @@ impl Volume {
                     });
                 }
             } else if entry.managed
-                && !(depth == 0 && name.eq_ignore_ascii_case(DRAFT))
+                && !draft_name(name)
                 && files.len() < storage::COUNT
                 && *used + entry.len <= storage::CACHE_BYTES
             {
@@ -672,16 +690,21 @@ impl Volume {
         Some(())
     }
 
-    pub fn read_draft(&self, data: &mut [u8]) -> bool {
-        self.entries()
-            .and_then(|entries| {
-                entries
-                    .into_iter()
-                    .find(|entry| entry.name.str().eq_ignore_ascii_case(DRAFT))
-            })
-            .is_some_and(|entry| {
-                entry.managed && entry.len == data.len() && self.read_entry(&entry, data)
-            })
+    pub fn read_draft(&self, name: &str) -> Option<Vec<u8>> {
+        let entry = self
+            .entries()?
+            .into_iter()
+            .find(|entry| entry.managed && entry.name.str().eq_ignore_ascii_case(name))?;
+        let mut bytes = alloc::vec![0; entry.len];
+        self.read_entry(&entry, &mut bytes).then_some(bytes)
+    }
+
+    pub fn has_draft(&self, name: &str) -> bool {
+        self.entries().is_none_or(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.name.str().eq_ignore_ascii_case(name))
+        })
     }
 
     fn dirty(&self, dirty: bool) -> bool {
@@ -831,7 +854,7 @@ impl Volume {
         {
             return false;
         }
-        if !path.eq_ignore_ascii_case(DRAFT) {
+        if !draft_name(path) {
             self.tracked
                 .retain(|entry| !entry.str().eq_ignore_ascii_case(path));
             if data.is_some() {
@@ -875,7 +898,12 @@ impl Volume {
         if data.is_none() && old.is_none() {
             return true;
         }
-        if data.is_some_and(|value| value.len() > storage::CAP) {
+        let maximum = if draft_name(name) {
+            storage::DRAFT_CAP
+        } else {
+            storage::CAP
+        };
+        if data.is_some_and(|value| value.len() > maximum) {
             return false;
         }
         let old_chain = old.map_or_else(
@@ -973,7 +1001,7 @@ impl Volume {
             set[1] = count as u8 - 1;
             set[4] = if directory {
                 0x10
-            } else if name.eq_ignore_ascii_case(DRAFT) {
+            } else if draft_name(name) {
                 2
             } else {
                 0x20
@@ -1052,10 +1080,6 @@ impl Volume {
                     false
                 }
             })
-    }
-
-    pub fn save_draft(&mut self, data: &[u8]) -> bool {
-        self.update(DRAFT, Some(data))
     }
 
     fn zero_clusters(&self, chain: &[u32]) -> bool {

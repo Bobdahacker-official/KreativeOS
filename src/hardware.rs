@@ -229,6 +229,7 @@ impl Input {
                     0x39 => return Some(Event::Key(0xa2)),
                     0x29 => return Some(Event::Key(0xaa)),
                     0x32 => return Some(Event::Key(0xab)),
+                    0x1f => return Some(Event::Key(0xac)),
                     0x02..=0x05 => return Some(Event::Key(0xa3 + b - 0x02)),
                     0x2e => return Some(Event::Key(0xa7)),
                     0x2f => return Some(Event::Key(if self.shift { 0xa9 } else { 0xa8 })),

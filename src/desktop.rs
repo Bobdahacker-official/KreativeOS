@@ -519,7 +519,12 @@ impl Desktop {
             w: (w as i32 * 3 / 4).min(800),
             h: (h as i32 * 2 / 3).min(545),
         };
-        if let Some((name, note)) = storage::load_draft() {
+        if let Some((name, note)) = d
+            .users
+            .current()
+            .filter(|_| !d.users.system())
+            .and_then(|_| storage::load_draft())
+        {
             let already_saved = storage::find(name.str()).is_some_and(|index| {
                 let saved = unsafe { &storage::FILES[index].data };
                 saved.bytes[..saved.len()] == note.bytes[..note.len()]
@@ -664,7 +669,10 @@ impl Desktop {
             self.load_local();
             self.open(3);
         } else {
-            self.checkpoint_draft(true);
+            if !self.checkpoint_draft(true) {
+                self.open(1);
+                return;
+            }
             self.filename = name;
             self.note = file;
             self.open(1);
@@ -1071,26 +1079,32 @@ impl Desktop {
         self.scroll = 0
     }
     fn save(&mut self) {
-        match storage::put(self.filename.str(), &self.note.bytes[..self.note.len()]) {
-            Ok(()) if storage::sync() => {
-                if self.draft_at.take().is_some() {
-                    storage::store_draft(self.filename.str(), &self.note);
-                }
+        match storage::save_file(self.filename.str(), &self.note.bytes) {
+            Ok(()) => {
+                self.draft_at = None;
+                storage::clear_saved_draft(self.filename.str());
                 self.notice.set("Saved to disk");
+                unsafe { hardware::log(b"KreativeOS: note saved to disk\r\n") };
             }
-            Ok(()) => self.notice.set("Saved in memory; data disk unavailable"),
             Err(error) => self.notice.set(error),
         }
     }
-    fn checkpoint_draft(&mut self, now: bool) {
-        if self
-            .draft_at
-            .is_some_and(|at| now || hardware::millis() >= at)
-        {
+    fn checkpoint_draft(&mut self, now: bool) -> bool {
+        let Some(deadline) = self.draft_at else {
+            return true;
+        };
+        if !now && hardware::millis() < deadline {
+            return false;
+        }
+        if storage::store_draft(self.filename.str(), &self.note) {
             self.draft_at = None;
-            if storage::store_draft(self.filename.str(), &self.note) {
-                unsafe { hardware::log(b"KreativeOS: note draft saved\r\n") };
-            }
+            unsafe { hardware::log(b"KreativeOS: note draft saved\r\n") };
+            true
+        } else {
+            self.draft_at = Some(hardware::millis() + 5_000);
+            self.notice
+                .set("Draft could not be saved. Keep this note open or save it to disk.");
+            false
         }
     }
     fn package_install(&mut self, index: usize, open: bool) {
@@ -1246,6 +1260,7 @@ impl Desktop {
                 _ => {}
             },
             1 => match key {
+                0xac => self.save(),
                 0xa7 if self.note.len() > 0 => {
                     self.clipboard.retain(|text| text.str() != self.note.str());
                     self.clipboard.insert(0, self.note.clone());
@@ -1487,7 +1502,11 @@ impl Desktop {
                 && layout.action(1).y + 34 < h =>
             {
                 if self.restart_armed {
-                    self.checkpoint_draft(true);
+                    if !self.checkpoint_draft(true) {
+                        self.restart_armed = false;
+                        self.settings_notice = "The current note could not be saved";
+                        return;
+                    }
                     hardware::reboot();
                 }
                 self.restart_armed = true;
@@ -1500,7 +1519,10 @@ impl Desktop {
             3 if layout.action(0).has(x, y) => self.users.add(),
             3 if layout.action(1).has(x, y) => self.users.change_password(),
             3 if layout.action(2).has(x, y) => {
-                self.checkpoint_draft(true);
+                if !self.checkpoint_draft(true) {
+                    self.settings_notice = "The current note could not be saved";
+                    return;
+                }
                 crate::audio::stop();
                 self.users.lock();
             }
@@ -1782,12 +1804,16 @@ impl Desktop {
     } else { self.terminal.append("Use cp SOURCE DESTINATION"); }
  },
  "cat"=>{if let Some(i)=storage::find(arg){unsafe{self.terminal.append(storage::FILES[i].data.str())}}else{self.terminal.append("File not found")}},
+ "touch" if storage::find(arg).is_some() => self.terminal.append("File already exists"),
  "touch"=>{match storage::put(arg,b""){Ok(())=>{self.terminal.append(if storage::sync(){"Created on disk"}else{"Created in memory"})},Err(e)=>self.terminal.append(e)}},
  "rm"=>{if storage::remove(arg){self.terminal.append(if storage::sync(){"Removed from disk"}else{"Removed from memory"})}else{self.terminal.append("File not found")}},
  "edit"=>{if arg.is_empty() || arg.len() > storage::PATH_CAP || !arg.is_ascii() || arg.contains('\\') {
    self.terminal.append("Enter a valid file name");
  } else {
-   self.checkpoint_draft(true);
+   if !self.checkpoint_draft(true) {
+       self.terminal.append("The current note could not be saved");
+       return;
+   }
    self.filename.set(arg);self.note.clear();if let Some(i)=storage::find(arg){unsafe{self.note=storage::FILES[i].data.clone()}}self.open(1)
  }},
  "save"=>{self.save();self.terminal.append(self.notice.str())},"clear"=>self.terminal.clear(),
@@ -1809,14 +1835,20 @@ impl Desktop {
  "dev"=>crate::developer::command(arg, &mut self.terminal),
  "accounts" if allow_script=>self.users.manage(arg, &mut self.terminal),
  "system1" if allow_script && arg.is_empty() => {
-     self.checkpoint_draft(true);
+     if !self.checkpoint_draft(true) {
+         self.terminal.append("The current note could not be saved");
+         return;
+     }
      if !self.users.enter_system() {
          self.terminal.append("A signed-in administrator must open system1");
      }
  },
  "passwd" if allow_script => self.users.change_password(),
  "lock" | "logout" if allow_script=>{
-     self.checkpoint_draft(true);
+     if !self.checkpoint_draft(true) {
+         self.terminal.append("The current note could not be saved");
+         return;
+     }
      if !self.users.lock() { self.terminal.append("Run accounts to enable sign-in"); }
  },
  "exec" if allow_script => {
@@ -1859,7 +1891,16 @@ impl Desktop {
    }
    self.terminal.append("Snapshot restore failed. Type snapshot to inspect the previous version.");
  },
- "reboot"=>{self.checkpoint_draft(true);hardware::reboot()}, ""=>(),_=>self.terminal.append("Unknown command. Type help.")}
+ "reboot"=>{if self.checkpoint_draft(true) { hardware::reboot() } self.terminal.append("The current note could not be saved");},
+ "discard" if allow_script && arg == "note" => {
+     self.draft_at = None;
+     storage::clear_saved_draft(self.filename.str());
+     self.note = storage::find(self.filename.str())
+         .map(|index| unsafe { storage::FILES[index].data.clone() }).unwrap_or_default();
+     self.notice.set("Unsaved changes discarded");
+     self.terminal.append("Unsaved note changes discarded");
+ },
+ ""=>(),_=>self.terminal.append("Unknown command. Type help.")}
     }
     fn pointer_hover(&self, w: i32, h: i32) -> Option<(usize, i32)> {
         if self.menu {
@@ -2165,7 +2206,9 @@ impl Desktop {
                 if Box2::at(16, 48, 72, 34).has(x, y) {
                     self.save()
                 } else if Box2::at(96, 48, 72, 34).has(x, y) {
-                    self.checkpoint_draft(true);
+                    if !self.checkpoint_draft(true) {
+                        return;
+                    }
                     self.filename.set("Untitled.txt");
                     self.note.clear();
                     self.notice.clear()

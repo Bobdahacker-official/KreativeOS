@@ -99,7 +99,7 @@ fn choose(
     let mut fallback = None;
     for (start, count) in ranges {
         if let Some(volume) = crate::exfat::Geometry::probe(start, count, sector, read) {
-            if volume.opted_in(read) {
+            if !volume.recovery && volume.opted_in(read) {
                 return Some(Media::Exfat {
                     volume,
                     writable: true,

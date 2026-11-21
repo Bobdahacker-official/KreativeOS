@@ -349,7 +349,7 @@ impl Session {
             let index = self.users.iter().position(|user| user.name.str() == name);
             if let Some(index) = index.filter(|&index| index != 0) {
                 if storage::account_has_files(name) {
-                    let _ = writeln!(out, "Move or remove this account's files first");
+                    let _ = writeln!(out, "Resolve this account's files, folders, or draft first");
                     return;
                 }
                 let user = self.users.remove(index);
@@ -472,7 +472,9 @@ impl Session {
             return;
         }
         if !storage::can_write() {
-            if view == View::Setup && storage::has_exfat() {
+            if storage::needs_recovery() {
+                self.message = "Repair the exFAT data disk before making account changes.";
+            } else if view == View::Setup && storage::has_exfat() {
                 if self.confirm_disk_write && storage::enable_data_writes() {
                     self.confirm_disk_write = false;
                     self.message = "Data disk writes enabled. Create your account.";
@@ -620,7 +622,11 @@ impl Session {
             ),
             View::Password => ("Change password", self.name(), "Save password"),
         };
-        if view == View::Setup && !storage::can_write() && storage::has_exfat() {
+        if view == View::Setup
+            && !storage::can_write()
+            && storage::has_exfat()
+            && !storage::needs_recovery()
+        {
             action = if self.confirm_disk_write {
                 "Confirm data disk writes"
             } else {

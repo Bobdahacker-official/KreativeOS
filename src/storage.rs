@@ -9,6 +9,7 @@ pub const LEGACY_CAP: usize = 2048;
 pub const LOCAL_NAME_CAP: usize = 32;
 pub const DISK_NAME_CAP: usize = LOCAL_NAME_CAP + 18;
 pub const PATH_CAP: usize = 240;
+pub const DRAFT_CAP: usize = CAP + PATH_CAP + 14;
 const SNAP: usize = 512 * 100;
 const SNAP_SECTORS: usize = SNAP / 512;
 const SNAP_A: u32 = 2048;
@@ -174,15 +175,16 @@ pub(crate) fn visible_name(name: &str) -> Option<&str> {
 }
 
 pub(crate) fn account_has_files(owner: &str) -> bool {
+    let owned = |name: &str| {
+        name.strip_prefix('@')
+            .and_then(|name| name.strip_prefix(owner))
+            .is_some_and(|tail| tail.starts_with('.'))
+    };
     unsafe {
         FILES.iter().any(|file| {
-            file.used && {
-                let name = file.name.str();
-                name.strip_prefix('@')
-                    .and_then(|name| name.strip_prefix(owner))
-                    .is_some_and(|tail| tail.starts_with('.'))
-                    || owns_program(owner, name).is_some()
-            }
+            file.used && (owned(file.name.str()) || owns_program(owner, file.name.str()).is_some())
+        }) || EXFAT.as_ref().is_some_and(|volume| {
+            volume.folder_paths().any(owned) || volume.has_draft(draft_key(Some(owner)).str())
         })
     }
 }
@@ -226,7 +228,9 @@ fn media() -> Option<Media> {
 pub fn filesystem() -> &'static str {
     unsafe {
         if EXFAT.is_some() {
-            if can_write() {
+            if needs_recovery() {
+                "exFAT (recovery mode)"
+            } else if can_write() {
                 "exFAT"
             } else {
                 "exFAT (read-only)"
@@ -239,15 +243,24 @@ pub fn filesystem() -> &'static str {
     }
 }
 
+pub fn needs_recovery() -> bool {
+    unsafe {
+        EXFAT
+            .as_ref()
+            .is_some_and(crate::exfat::Volume::needs_recovery)
+    }
+}
+
 pub fn can_write() -> bool {
     unsafe {
-        DISK && !matches!(
-            media(),
-            Some(Media::Exfat {
-                writable: false,
-                ..
-            })
-        )
+        DISK && !needs_recovery()
+            && !matches!(
+                media(),
+                Some(Media::Exfat {
+                    writable: false,
+                    ..
+                })
+            )
     }
 }
 
@@ -265,7 +278,7 @@ pub(crate) fn scrub_free(cursor: &mut u32, budget: u8) -> Result<bool, &'static 
 
 pub(crate) fn enable_data_writes() -> bool {
     unsafe {
-        if EXFAT.is_none() {
+        if EXFAT.is_none() || needs_recovery() {
             return false;
         }
         let media = match &mut DRIVER {
@@ -284,7 +297,10 @@ pub(crate) fn enable_data_writes() -> bool {
             },
             None => return false,
         };
-        if let Media::Exfat { writable, .. } = media {
+        if let Media::Exfat { volume, writable } = media {
+            if volume.recovery {
+                return false;
+            }
             *writable = true;
             return true;
         }
@@ -309,7 +325,7 @@ pub fn mkdir(name: &str) -> Result<(), &'static str> {
         return Err("A writable exFAT volume is required");
     }
     let path = scoped_name(name).ok_or("Invalid folder path")?;
-    if !path.str().split('/').all(crate::exfat::valid_name) {
+    if !path.str().split('/').all(ordinary_component) {
         return Err("Invalid folder path");
     }
     let volume = unsafe { EXFAT.as_mut() }.ok_or("Folders require exFAT")?;
@@ -339,7 +355,7 @@ pub fn rmdir(name: &str) -> Result<(), &'static str> {
         return Err("A writable exFAT volume is required");
     }
     let path = scoped_name(name).ok_or("Invalid folder path")?;
-    if !path.str().split('/').all(crate::exfat::valid_name) {
+    if !path.str().split('/').all(ordinary_component) {
         return Err("Invalid folder path");
     }
     let volume = unsafe { EXFAT.as_mut() }.ok_or("Folders require exFAT")?;
@@ -589,6 +605,9 @@ pub unsafe fn init() {
             _ => {}
         }
     }
+    if EXFAT.is_some() && needs_recovery() {
+        log(b"KreativeOS: exFAT recovery mode (read-only)\r\n");
+    }
     log(b"KreativeOS: filesystem mounted\r\n");
 }
 
@@ -694,24 +713,84 @@ fn draft_valid(record: &DraftRecord) -> bool {
         && get32(record, 13) <= LEGACY_CAP as u32
 }
 
-pub fn load_draft() -> Option<(Text<32>, Data)> {
-    if standard_account().is_some() {
+fn draft_key(owner: Option<&str>) -> Text<DISK_NAME_CAP> {
+    let mut key = Text::new();
+    if let Some(owner) = owner {
+        key.append(crate::exfat::DRAFT_PREFIX);
+        key.append(owner);
+        key.append(".KDR");
+    } else {
+        key.set(crate::exfat::DRAFT);
+    }
+    key
+}
+
+fn exfat_draft(bytes: &[u8]) -> Option<(Text<PATH_CAP>, Data)> {
+    if bytes.starts_with(b"KDR1") {
+        let legacy: &DraftRecord = bytes.try_into().ok()?;
+        return decode_legacy_draft(legacy);
+    }
+    let header = bytes.get(..14)?;
+    if &header[..4] != b"KDR2" || get32(header, 4) != checksum(&bytes[8..]) {
         return None;
     }
+    let name_len = u16::from_le_bytes(header[8..10].try_into().ok()?) as usize;
+    let data_len = get32(header, 10) as usize;
+    let rest = bytes.get(14..)?;
+    if !(1..=PATH_CAP).contains(&name_len) || data_len > CAP || rest.len() != name_len + data_len {
+        return None;
+    }
+    let path = core::str::from_utf8(&rest[..name_len]).ok()?;
+    if !path.split('/').all(ordinary_component) {
+        return None;
+    }
+    let mut name = Text::new();
+    name.set(path);
+    Some((
+        name,
+        Data {
+            bytes: rest[name_len..].to_vec(),
+        },
+    ))
+}
+
+fn decode_legacy_draft(record: &DraftRecord) -> Option<(Text<PATH_CAP>, Data)> {
+    if !draft_valid(record) {
+        return None;
+    }
+    let len = record[12] as usize;
+    let path = core::str::from_utf8(&record[17..17 + len]).ok()?;
+    if path.is_empty() {
+        return None;
+    }
+    let mut name = Text::new();
+    name.set(path);
+    let len = get32(record, 13) as usize;
+    Some((
+        name,
+        Data {
+            bytes: record[512..512 + len].to_vec(),
+        },
+    ))
+}
+
+pub fn load_draft() -> Option<(Text<PATH_CAP>, Data)> {
+    let owner = standard_account();
     unsafe {
         if !DISK {
             return None;
         }
+        if let Some(volume) = &EXFAT {
+            let key = draft_key(owner.as_ref().map(Text::str));
+            return exfat_draft(&volume.read_draft(key.str())?);
+        }
+        if owner.is_some() {
+            return None;
+        }
         let mut first = [0; 512 * DRAFT_SECTORS];
         let mut second = [0; 512 * DRAFT_SECTORS];
-        let (a, b) = if let Some(volume) = &EXFAT {
-            (volume.read_draft(&mut first) && draft_valid(&first), false)
-        } else {
-            (
-                read_record(draft_base(0), &mut first) && draft_valid(&first),
-                read_record(draft_base(1), &mut second) && draft_valid(&second),
-            )
-        };
+        let a = read_record(draft_base(0), &mut first) && draft_valid(&first);
+        let b = read_record(draft_base(1), &mut second) && draft_valid(&second);
         let record = if a && (!b || !newer(get32(&second, 4), get32(&first, 4))) {
             first
         } else if b {
@@ -720,26 +799,30 @@ pub fn load_draft() -> Option<(Text<32>, Data)> {
             return None;
         };
         DRAFT_GEN = Some(get32(&record, 4));
-        let mut name = Text::<32>::new();
-        name.len = record[12] as usize;
-        name.bytes[..name.len].copy_from_slice(&record[17..17 + name.len]);
-        if name.str().is_empty() {
-            return None;
-        }
-        let len = get32(&record, 13) as usize;
-        let data = Data {
-            bytes: record[512..512 + len].to_vec(),
-        };
-        Some((name, data))
+        decode_legacy_draft(&record)
     }
 }
 
 pub fn store_draft(name: &str, data: &Data) -> bool {
-    if standard_account().is_some() || name.len() > LOCAL_NAME_CAP || data.len() > LEGACY_CAP {
+    if !can_write() || name.len() > PATH_CAP || !name.split('/').all(ordinary_component) {
         return false;
     }
+    let owner = standard_account();
     unsafe {
-        if !can_write() {
+        if let Some(volume) = &mut EXFAT {
+            let key = draft_key(owner.as_ref().map(Text::str));
+            let mut record = Vec::with_capacity(14 + name.len() + data.len());
+            record.extend_from_slice(b"KDR2");
+            record.extend_from_slice(&[0; 4]);
+            record.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            record.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            record.extend_from_slice(name.as_bytes());
+            record.extend_from_slice(&data.bytes);
+            let hash = checksum(&record[8..]);
+            record[4..8].copy_from_slice(&hash.to_le_bytes());
+            return volume.update(key.str(), Some(&record));
+        }
+        if owner.is_some() || name.len() > LOCAL_NAME_CAP || data.len() > LEGACY_CAP {
             return false;
         }
         let next = DRAFT_GEN.map_or(0, |generation| generation.wrapping_add(1));
@@ -752,18 +835,35 @@ pub fn store_draft(name: &str, data: &Data) -> bool {
         record[512..512 + data.len()].copy_from_slice(&data.bytes);
         let hash = checksum(&record[12..]);
         record[8..12].copy_from_slice(&hash.to_le_bytes());
-        let success = if let Some(volume) = &mut EXFAT {
-            volume.save_draft(&record)
-        } else {
-            publish_record(draft_base(next), &mut record)
-        };
-        if !success {
+        if !publish_record(draft_base(next), &mut record) {
             return false;
         }
         DRAFT_GEN = Some(next);
         true
     }
 }
+
+pub fn clear_saved_draft(name: &str) {
+    if !can_write() {
+        return;
+    }
+    let owner = standard_account();
+    if let Some(volume) = unsafe { &mut EXFAT } {
+        let key = draft_key(owner.as_ref().map(Text::str));
+        if volume
+            .read_draft(key.str())
+            .and_then(|bytes| exfat_draft(&bytes))
+            .is_some_and(|(path, _)| path.str().eq_ignore_ascii_case(name))
+        {
+            volume.update(key.str(), None);
+        }
+    }
+}
+
+fn ordinary_component(name: &str) -> bool {
+    crate::exfat::valid_name(name) && !crate::exfat::draft_name(name)
+}
+
 pub fn find(name: &str) -> Option<usize> {
     if crate::users::is_database(name) {
         return None;
@@ -805,9 +905,9 @@ pub(crate) fn put_internal(name: &str, data: &[u8]) -> Result<(), &'static str> 
         || name.contains('\\')
         || name.len() > if exfat { PATH_CAP } else { LOCAL_NAME_CAP }
         || data.len() > if exfat { CAP } else { LEGACY_CAP }
-        || (exfat && !name.split('/').all(crate::exfat::valid_name))
+        || (exfat && !name.split('/').all(ordinary_component))
         || (!exfat && name.contains('/'))
-        || name.eq_ignore_ascii_case(crate::exfat::DRAFT)
+        || crate::exfat::draft_name(name)
     {
         return Err("Invalid file path or size");
     }
@@ -843,10 +943,25 @@ pub(crate) fn put_internal(name: &str, data: &[u8]) -> Result<(), &'static str> 
 }
 
 pub fn store_file(name: &str, data: &[u8]) -> bool {
-    if put(name, data).is_err() {
-        return false;
+    save_file(name, data).is_ok()
+}
+
+pub fn save_file(name: &str, data: &[u8]) -> Result<(), &'static str> {
+    if !can_write() {
+        return Err("The data disk is not writable");
     }
-    scoped_name(name).is_some_and(|path| persist_file(path.str(), data))
+    let path = scoped_name(name).ok_or("Invalid file path")?;
+    let previous = find_internal(path.str()).map(|i| unsafe { (i, FILES[i].clone()) });
+    put(name, data)?;
+    if persist_file(path.str(), data) {
+        return Ok(());
+    }
+    if let Some((index, file)) = previous {
+        unsafe { FILES[index] = file };
+    } else {
+        remove_internal(path.str());
+    }
+    Err("The disk save failed. Your edit is still open.")
 }
 
 pub(crate) fn store_account_file(name: &str, data: &[u8]) -> bool {
