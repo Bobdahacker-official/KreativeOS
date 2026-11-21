@@ -21,6 +21,7 @@ pub static mut DMA: usize = 0;
 static mut HOSTS: Vec<Host> = Vec::new();
 static mut EVENTS: VecDeque<Event> = VecDeque::new();
 static mut POINTER_ACTIVE: bool = false;
+static mut RTL8811CU: Option<crate::rtl8811cu::Probe> = None;
 const IOC: u32 = 1 << 5;
 const IDT: u32 = 1 << 6;
 const FINISHED: u8 = 1;
@@ -420,6 +421,12 @@ impl Host {
                 self.issue(trb(input, 0, (13 << 10) | (u32::from(slot) << 24)))?;
             }
         }
+        if !self.control(&mut device, [0x80, 6, 0, 1, 0, 0, 18, 0]) {
+            return None;
+        }
+        let id = rd(address, 8);
+        let realtek_wifi =
+            id as u16 == crate::rtl8811cu::VENDOR && (id >> 16) as u16 == crate::rtl8811cu::PRODUCT;
         if !self.control(&mut device, [0x80, 6, 0, 2, 0, 0, 9, 0]) {
             return None;
         }
@@ -440,6 +447,7 @@ impl Host {
         let descriptor = core::slice::from_raw_parts(address as *const u8, size);
         let config = descriptor[5];
         let mut iface = (0, 0, 0, 0);
+        let mut wifi_interface = false;
         let mut offset = 0;
         while offset + 2 <= size {
             let len = usize::from(descriptor[offset]);
@@ -449,6 +457,7 @@ impl Host {
             let entry = &descriptor[offset..offset + len];
             offset += len;
             if entry[1] == 4 && len >= 9 {
+                wifi_interface |= entry[3] == 0 && entry[5..8] == [0xff; 3];
                 iface = if entry[3] == 0 {
                     (entry[2], entry[5], entry[6], entry[7])
                 } else {
@@ -497,7 +506,28 @@ impl Host {
                 });
             }
         }
-        if config == 0 || device.endpoints.is_empty() {
+        if config == 0 {
+            return None;
+        }
+        if realtek_wifi && wifi_interface && device.endpoints.is_empty() {
+            let identified = self.control(&mut device, [0, 9, config, 0, 0, 0, 0, 0]);
+            let detection = if identified {
+                crate::rtl8811cu::probe(|setup| {
+                    wr(address, 0, u32::MAX);
+                    self.control(&mut device, setup).then(|| rd(address, 0))
+                })
+            } else {
+                crate::rtl8811cu::Probe::RegisterUnavailable
+            };
+            RTL8811CU = Some(detection);
+            let mut line = Text::new();
+            detection.describe(&mut line);
+            hardware::log(b"KreativeOS: ");
+            hardware::log(line.str().as_bytes());
+            hardware::log(b"\r\n");
+            return identified.then_some(device);
+        }
+        if device.endpoints.is_empty() {
             return None;
         }
         ptr::write_bytes(input as *mut u8, 0, PAGE);
@@ -747,6 +777,10 @@ pub fn poll() -> Option<Event> {
         }
         EVENTS.pop_front()
     }
+}
+
+pub fn rtl8811cu() -> Option<crate::rtl8811cu::Probe> {
+    unsafe { RTL8811CU }
 }
 
 pub struct Disk {

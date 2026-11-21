@@ -1,4 +1,4 @@
-//! RTL8139 + Ethernet/ARP/IPv4/UDP/DNS/TCP/HTTP. All wire reads are length checked.
+//! Ethernet/ARP/IPv4/UDP/DNS/TCP/HTTP. All wire reads are length checked.
 use crate::{
     dhcp::{self, Address, Config, Offer},
     hardware::*,
@@ -7,6 +7,7 @@ use crate::{
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 pub static mut DMA: usize = 0;
+pub const DMA_PAGES: usize = 40;
 fn u16be(b: &[u8], n: usize) -> u16 {
     u16::from_be_bytes([b[n], b[n + 1]])
 }
@@ -47,7 +48,7 @@ pub struct Network {
     link_up: bool,
     next_hop: Address,
     io: u16,
-    intel: Option<crate::e1000::Adapter>,
+    pci_adapter: Option<PciAdapter>,
     pub wifi: crate::wifi::Module,
     pub response: Option<crate::web::Response>,
     pub mac: [u8; 6],
@@ -81,6 +82,36 @@ pub struct Network {
     retries: u8,
     last: [u8; 1536],
     last_len: usize,
+}
+enum PciAdapter {
+    Intel(crate::e1000::Adapter),
+    Realtek(crate::rtl8168::Adapter),
+}
+impl PciAdapter {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Intel(adapter) => adapter.model.name(),
+            Self::Realtek(_) => "Realtek RTL8168H/8111H",
+        }
+    }
+    fn link_speed(&self) -> Option<u16> {
+        match self {
+            Self::Intel(adapter) => adapter.link_speed(),
+            Self::Realtek(adapter) => adapter.link_speed(),
+        }
+    }
+    fn receive(&mut self, frame: &mut [u8]) -> Option<usize> {
+        match self {
+            Self::Intel(adapter) => adapter.receive(frame),
+            Self::Realtek(adapter) => adapter.receive(frame),
+        }
+    }
+    fn transmit(&mut self, frame: &[u8]) -> bool {
+        match self {
+            Self::Intel(adapter) => adapter.transmit(frame),
+            Self::Realtek(adapter) => adapter.transmit(frame),
+        }
+    }
 }
 struct Discovery {
     xid: u32,
@@ -134,7 +165,7 @@ impl Network {
             wifi: crate::wifi::Module::new(),
             response: None,
             http_bytes: Vec::new(),
-            intel: None,
+            pci_adapter: None,
             mac: [0; 6],
             received: 0,
             sent: 0,
@@ -167,6 +198,7 @@ impl Network {
             last_len: 0,
         };
         let mut intel_slot = None;
+        let mut realtek_slot = None;
         for bus in 0..=255 {
             for slot in 0..32 {
                 for func in 0..8 {
@@ -178,6 +210,9 @@ impl Network {
                         if intel_slot.is_none() {
                             intel_slot = Some((bus, slot, func, model));
                         }
+                    }
+                    if id == crate::rtl8168::PCI_ID && realtek_slot.is_none() {
+                        realtek_slot = Some((bus, slot, func));
                     }
                     if id == 0x813910ec && n.io == 0 {
                         let bar = pci(bus, slot, func, 0x10);
@@ -192,10 +227,28 @@ impl Network {
             }
         }
         if n.io == 0 {
+            if let Some((bus, slot, func)) = realtek_slot {
+                match crate::rtl8168::Adapter::init(bus, slot, func, DMA) {
+                    Ok(adapter) => {
+                        n.mac = adapter.mac;
+                        n.pci_adapter = Some(PciAdapter::Realtek(adapter));
+                        n.status = "Ethernet adapter ready";
+                        log(b"KreativeOS: Realtek RTL8168H/8111H ready\r\n");
+                        return n;
+                    }
+                    Err(reason) => {
+                        n.status = reason;
+                        n.ethernet_status = reason;
+                        log(b"KreativeOS: ");
+                        log(reason.as_bytes());
+                        log(b"\r\n");
+                    }
+                }
+            }
             if let Some((bus, slot, func, model)) = intel_slot {
                 if let Some(adapter) = crate::e1000::Adapter::init(bus, slot, func, model, DMA) {
                     n.mac = adapter.mac;
-                    n.intel = Some(adapter);
+                    n.pci_adapter = Some(PciAdapter::Intel(adapter));
                     n.status = "Ethernet adapter ready";
                     log(b"KreativeOS: ");
                     log(model.name().as_bytes());
@@ -231,8 +284,8 @@ impl Network {
         n
     }
     pub fn adapter_name(&self) -> &'static str {
-        if let Some(adapter) = &self.intel {
-            adapter.model.name()
+        if let Some(adapter) = &self.pci_adapter {
+            adapter.name()
         } else if self.io != 0 {
             "RTL8139"
         } else {
@@ -240,10 +293,10 @@ impl Network {
         }
     }
     pub fn online(&self) -> bool {
-        self.io != 0 || self.intel.is_some()
+        self.io != 0 || self.pci_adapter.is_some()
     }
     pub fn link_speed(&self) -> Option<u16> {
-        if let Some(adapter) = &self.intel {
+        if let Some(adapter) = &self.pci_adapter {
             adapter.link_speed()
         } else if self.io != 0 {
             let status = unsafe { in8(self.io + 0x58) };
@@ -489,7 +542,7 @@ impl Network {
         if !self.online() || frame.len() > 1536 {
             return;
         }
-        if let Some(adapter) = &mut self.intel {
+        if let Some(adapter) = &mut self.pci_adapter {
             if adapter.transmit(frame) {
                 self.sent += 1;
                 self.sent_bytes += frame.len() as u64;
@@ -781,7 +834,7 @@ impl Network {
         }
         for _ in 0..16 {
             let mut f = [0u8; 1536];
-            let len = if let Some(adapter) = &mut self.intel {
+            let len = if let Some(adapter) = &mut self.pci_adapter {
                 let Some(len) = adapter.receive(&mut f) else {
                     break;
                 };

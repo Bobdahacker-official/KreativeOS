@@ -27,6 +27,8 @@ mod packages;
 mod partition;
 mod pictures;
 mod ring3;
+mod rtl8168;
+mod rtl8811cu;
 mod secure;
 mod storage;
 mod system1;

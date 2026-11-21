@@ -47,7 +47,10 @@ pub fn ticks() -> u64 {
 static mut MHZ: u64 = 1000;
 static mut START: u64 = 0;
 pub fn millis() -> u64 {
-    unsafe { (ticks() - START) / (MHZ * 1000) }
+    micros() / 1000
+}
+pub fn micros() -> u64 {
+    unsafe { (ticks() - START) / MHZ }
 }
 fn wait_write() {
     unsafe {

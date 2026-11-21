@@ -161,9 +161,9 @@ pub unsafe fn prepare(image: usize, st: *mut SystemTable) -> Option<Screen> {
     if (bs.allocate_pages)(0, 2, (pixels * 4 + 4095) / 4096, &mut back) != 0 {
         return None;
     }
-    // DMA buffers are explicitly allocated below 4GiB for the RTL8139 controller.
+    // Network DMA buffers are allocated below 4 GiB for 32-bit DMA engines.
     let mut dma = 0xffff_ffffu64;
-    if (bs.allocate_pages)(1, 2, 40, &mut dma) != 0 {
+    if (bs.allocate_pages)(1, 2, crate::net::DMA_PAGES, &mut dma) != 0 {
         return None;
     }
     crate::net::DMA = dma as usize;

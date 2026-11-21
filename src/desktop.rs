@@ -3325,7 +3325,11 @@ impl Desktop {
                 button(s, x + 24, y + 378, 131, "WPA2 hotspot", SURFACE);
                 button(s, x + 165, y + 378, 131, "WPA3 hotspot", SURFACE);
                 let mut native = Text::new();
-                self.native_wifi.describe(&mut native);
+                if let Some(realtek) = crate::usb::rtl8811cu() {
+                    realtek.describe(&mut native);
+                } else {
+                    self.native_wifi.describe(&mut native);
+                }
                 s.text(
                     x + 24,
                     y + 354,

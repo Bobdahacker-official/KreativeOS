@@ -81,6 +81,8 @@ Ethernet requests an IPv4 lease automatically on boot. It renews with the origin
 
 Ethernet supports PCI RTL8139 and Intel 82540EM, 82544GC, 82545EM, and 82574L. QEMU defaults to RTL8139. Set `NIC_MODEL=e1000` for 82540EM or `NIC_MODEL=e1000e` for 82574L. The stack implements Ethernet, ARP, IPv4, UDP DNS with CNAME resolution, and a single bounded TCP/HTTP connection with retransmission and timeouts. DNS is IPv4 only. It reports truncated UDP replies and does not retry them over TCP.
 
+The native Realtek PCIe driver targets RTL8168H/8111H controllers with PCI ID `10ec:8168` and the H-generation MAC signature. It uses DMA queues and the same Ethernet, DHCP and DNS stack. Physical link negotiation and traffic on the RTL8168H still need hardware verification. [OpenBSD RTL8168H register reference](https://github.com/openbsd/src/blob/master/sys/dev/ic/re.c)
+
 Open `https://example.com/` in Browser or `file:Readme.html` for the bundled local document. The browser shows page text, the first compatible HTML image and a Play sound button for the first WAV audio source. Select **Links** to open links from the current web page, and use the scroll wheel or Up/Down to see more. Direct links to PNG, JPEG, BMP and WAV also open. The browser uses HTTP/1.1 and supports redirects, chunked bodies, and single-member gzip. The response buffer and decompressed body are each capped at 768 KiB. HTTPS uses TLS 1.3 and checks the certificate chain, hostname and validity dates against the guest clock and the bundled Mozilla roots. It requires an x86 CPU with RDRAND, enabled by the supplied QEMU configuration. Plain HTTP uses Ethernet. HTTPS pages and resources stay on HTTPS when following links and redirects.
 
 The graphical desktop uses a cooperative event loop and polled drivers. KR3 programs enter CPU ring 3 in separate address spaces. Paint content stays in memory. KAPP packages contain document apps.
@@ -90,6 +92,8 @@ The graphical desktop uses a cooperative event loop and polled drivers. KR3 prog
 Connect an ESP32 running Espressif ESP-AT to COM2 using a UART adapter appropriate for the board and the PC port. The driver uses 115200 baud, 8 data bits, no parity and one stop bit. In **Network** enter the SSID and password, then select **Connect**. The module associates and gets its own IP address. HTTPS then uses the module's TCP transport with certificate and hostname checks inside KreativeOS.
 
 QEMU can attach an ESP-AT serial backend with `ESP_AT_SERIAL`. The integration check uses a local protocol fixture for this serial transport.
+
+At boot, xHCI can probe the Realtek RTL8811CU USB adapter (`0bda:c811`) and report its chip revision under **Network**. Native scanning and association for this adapter are still in development. [Realtek USB device and register transport reference](https://github.com/torvalds/linux/blob/master/drivers/net/wireless/realtek/rtw88/rtw8821cu.c)
 
 The browser plays 16-bit PCM WAV through Intel ICH AC'97. QEMU adds the audio controller at boot. Set `AUDIO_SPEC=driver=pa` or another backend supported by your QEMU install if you want to select the host audio output explicitly.
 
