@@ -80,15 +80,20 @@ if imports.is_dir():
         pictures = pack(paths)
         picture_cluster = allocate(pictures)
         image[root_pos+32:root_pos+64] = entry('IMAGES  KIP', 32, picture_cluster, len(pictures))
-firmware = os.environ.get('AX210_FIRMWARE')
-if firmware:
+for variable, name, minimum, maximum in (
+    ('AX210_FIRMWARE', 'AX210   UCO', 88, 4 * 1024 * 1024),
+    ('RTL8811CU_FIRMWARE', 'RTL8821CBIN', 64, 256 * 1024),
+):
+    firmware = os.environ.get(variable)
+    if not firmware:
+        continue
     source = Path(firmware)
-    if not 88 <= source.stat().st_size <= 4 * 1024 * 1024:
-        raise ValueError('AX210 firmware must be between 88 bytes and 4 MiB')
+    if not minimum <= source.stat().st_size <= maximum:
+        raise ValueError(f'{variable} must be between {minimum} and {maximum} bytes')
     data = source.read_bytes()
     firmware_cluster = allocate(data)
-    slot = root_pos + (64 if image[root_pos+32] else 32)
-    image[slot:slot+32] = entry('AX210   UCO', 32, firmware_cluster, len(data))
+    slot = next(pos for pos in range(root_pos + 32, root_pos + 160, 32) if not image[pos])
+    image[slot:slot+32] = entry(name, 32, firmware_cluster, len(data))
 source_dir = os.environ.get('KREATIVE_DEV_DIR')
 if source_dir:
     source = Path(source_dir)
@@ -118,7 +123,7 @@ if source_dir:
         if len(developer) > 1024 * 1024:
             raise ValueError('The developer pack exceeds 1 MiB')
     developer_cluster = allocate(developer)
-    slot = next(pos for pos in range(root_pos + 32, root_pos + 128, 32) if not image[pos])
+    slot = next(pos for pos in range(root_pos + 32, root_pos + 160, 32) if not image[pos])
     image[slot:slot+32] = entry('DEVELOP KDP', 32, developer_cluster, len(developer))
 for i in range(2):
     pos = base + (reserved + i * fat_sectors) * sector

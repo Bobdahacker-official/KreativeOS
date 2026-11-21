@@ -415,6 +415,23 @@ unsafe fn load_pictures(bs: &BootServices, free: unsafe extern "efiapi" fn(*mut 
                 }
             }
         }
+        if crate::rtl8811cu::FIRMWARE_LEN == 0 {
+            // FAT 8.3 name: RTL8821C.BIN
+            let name = [92u16, 82, 84, 76, 56, 56, 50, 49, 67, 46, 66, 73, 78, 0];
+            let mut file = core::ptr::null_mut();
+            if ((*root).open)(root, &mut file, name.as_ptr(), 1, 0) == 0 {
+                let buffer = &mut crate::rtl8811cu::FIRMWARE;
+                let mut len = buffer.len();
+                let status = ((*file).read)(file, &mut len, buffer.as_mut_ptr());
+                let mut extra = 1;
+                let mut byte = 0;
+                let end = ((*file).read)(file, &mut extra, &mut byte);
+                ((*file).close)(file);
+                if status == 0 && end == 0 && extra == 0 && (64..=buffer.len()).contains(&len) {
+                    crate::rtl8811cu::FIRMWARE_LEN = len;
+                }
+            }
+        }
         let mut file = core::ptr::null_mut();
         let status = ((*root).open)(root, &mut file, filename.as_ptr(), 1, 0);
         if status == 0 {

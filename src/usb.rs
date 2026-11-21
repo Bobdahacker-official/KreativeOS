@@ -96,6 +96,47 @@ enum Kind {
     Mouse,
     BulkIn,
     BulkOut,
+    RadioIn,
+    RadioOut,
+}
+struct RadioUsb<'a> {
+    host: &'a mut Host,
+    device: &'a mut Device,
+}
+impl crate::rtl8811cu::Usb for RadioUsb<'_> {
+    fn control(&mut self, setup: [u8; 8], data: &mut [u8]) -> bool {
+        if data.len() != usize::from(u16::from_le_bytes([setup[6], setup[7]])) || data.len() > 4 {
+            return false;
+        }
+        let address = (self.device.area + 7 * PAGE) as *mut u8;
+        let input = setup[0] & 0x80 != 0;
+        unsafe {
+            if input {
+                ptr::write_bytes(address, 0xff, data.len());
+            } else {
+                ptr::copy_nonoverlapping(data.as_ptr(), address, data.len());
+            }
+            if !self.host.control(self.device, setup) {
+                return false;
+            }
+            if input {
+                ptr::copy_nonoverlapping(address, data.as_mut_ptr(), data.len());
+            }
+        }
+        true
+    }
+    fn bulk_out(&mut self, data: &[u8]) -> bool {
+        if data.len() > 2 * PAGE {
+            return false;
+        }
+        let address = self.device.area + 8 * PAGE;
+        unsafe {
+            ptr::copy_nonoverlapping(data.as_ptr(), address as *mut u8, data.len());
+            self.host
+                .bulk_transfer(self.device, Kind::RadioOut, address, data.len())
+                == Some(data.len())
+        }
+    }
 }
 struct Endpoint {
     dci: u8,
@@ -447,7 +488,6 @@ impl Host {
         let descriptor = core::slice::from_raw_parts(address as *const u8, size);
         let config = descriptor[5];
         let mut iface = (0, 0, 0, 0);
-        let mut wifi_interface = false;
         let mut offset = 0;
         while offset + 2 <= size {
             let len = usize::from(descriptor[offset]);
@@ -457,7 +497,6 @@ impl Host {
             let entry = &descriptor[offset..offset + len];
             offset += len;
             if entry[1] == 4 && len >= 9 {
-                wifi_interface |= entry[3] == 0 && entry[5..8] == [0xff; 3];
                 iface = if entry[3] == 0 {
                     (entry[2], entry[5], entry[6], entry[7])
                 } else {
@@ -470,6 +509,8 @@ impl Host {
                     (3, 1, 2, 3, true) => Some(Kind::Mouse),
                     (8, 6, 0x50, 2, true) => Some(Kind::BulkIn),
                     (8, 6, 0x50, 2, false) => Some(Kind::BulkOut),
+                    (0xff, 0xff, 0xff, 2, true) if realtek_wifi => Some(Kind::RadioIn),
+                    (0xff, 0xff, 0xff, 2, false) if realtek_wifi => Some(Kind::RadioOut),
                     _ => None,
                 }) else {
                     continue;
@@ -509,24 +550,6 @@ impl Host {
         if config == 0 {
             return None;
         }
-        if realtek_wifi && wifi_interface && device.endpoints.is_empty() {
-            let identified = self.control(&mut device, [0, 9, config, 0, 0, 0, 0, 0]);
-            let detection = if identified {
-                crate::rtl8811cu::probe(|setup| {
-                    wr(address, 0, u32::MAX);
-                    self.control(&mut device, setup).then(|| rd(address, 0))
-                })
-            } else {
-                crate::rtl8811cu::Probe::RegisterUnavailable
-            };
-            RTL8811CU = Some(detection);
-            let mut line = Text::new();
-            detection.describe(&mut line);
-            hardware::log(b"KreativeOS: ");
-            hardware::log(line.str().as_bytes());
-            hardware::log(b"\r\n");
-            return identified.then_some(device);
-        }
         if device.endpoints.is_empty() {
             return None;
         }
@@ -547,8 +570,8 @@ impl Host {
             adds |= 1 << ep.dci;
             let ctx = input + self.context * (usize::from(ep.dci) + 1);
             let code = match ep.kind {
-                Kind::BulkIn => 6,
-                Kind::BulkOut => 2,
+                Kind::BulkIn | Kind::RadioIn => 6,
+                Kind::BulkOut | Kind::RadioOut => 2,
                 _ => 7,
             };
             wr(ctx, 0, u32::from(ep.interval) << 16);
@@ -573,6 +596,21 @@ impl Host {
         self.issue(trb(input, 0, (12 << 10) | (u32::from(slot) << 24)))?;
         if !self.control(&mut device, [0, 9, config, 0, 0, 0, 0, 0]) {
             return None;
+        }
+        if realtek_wifi
+            && device.endpoints.iter().any(|ep| ep.kind == Kind::RadioIn)
+            && device.endpoints.iter().any(|ep| ep.kind == Kind::RadioOut)
+        {
+            let detection = crate::rtl8811cu::start(&mut RadioUsb {
+                host: self,
+                device: &mut device,
+            });
+            RTL8811CU = Some(detection);
+            let mut line = Text::new();
+            detection.describe(&mut line);
+            hardware::log(b"KreativeOS: ");
+            hardware::log(line.str().as_bytes());
+            hardware::log(b"\r\n");
         }
         let mut i = 0;
         while i < device.endpoints.len() {
@@ -636,10 +674,18 @@ impl Host {
         address: usize,
         length: usize,
     ) -> Option<usize> {
-        let ep = device
-            .endpoints
-            .iter_mut()
-            .find(|ep| ep.kind == if input { Kind::BulkIn } else { Kind::BulkOut })?;
+        let kind = if input { Kind::BulkIn } else { Kind::BulkOut };
+        self.bulk_transfer(device, kind, address, length)
+    }
+    unsafe fn bulk_transfer(
+        &mut self,
+        device: &mut Device,
+        kind: Kind,
+        address: usize,
+        length: usize,
+    ) -> Option<usize> {
+        let input = matches!(kind, Kind::BulkIn | Kind::RadioIn);
+        let ep = device.endpoints.iter_mut().find(|ep| ep.kind == kind)?;
         let first = length.min(0x10000 - (address & 0xffff));
         let mut td = 0;
         if first < length {
