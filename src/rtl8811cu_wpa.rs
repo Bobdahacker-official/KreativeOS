@@ -69,6 +69,7 @@ struct Challenge {
     anonce: [u8; 32],
     replay: u64,
     ptk: Zeroizing<[u8; 48]>,
+    started: u64,
 }
 
 struct KeyFrame<'a> {
@@ -174,16 +175,38 @@ impl Handshake {
         })
     }
 
-    pub fn advance(&mut self, bytes: &[u8]) -> Result<Option<(Vec<u8>, Option<Keys>)>> {
+    pub fn complete(&mut self) {
+        self.challenge = None;
+    }
+
+    pub fn advance(
+        &mut self,
+        bytes: &[u8],
+        active: Option<&Keys>,
+        now: u64,
+    ) -> Result<Option<(Vec<u8>, Option<Keys>)>> {
         let Some(frame) = KeyFrame::parse(bytes) else {
             return Ok(None);
         };
-        if frame.flags == 2 | ACK | PAIRWISE {
+        if self
+            .challenge
+            .as_ref()
+            .is_some_and(|c| now.saturating_sub(c.started) >= 15_000)
+        {
+            self.complete();
+        }
+        if active.is_some_and(|keys| frame.replay <= keys.replay) {
+            return Ok(None);
+        }
+        let first = 2 | ACK | PAIRWISE;
+        if frame.flags == first || (active.is_some() && frame.flags == first | SECURE) {
             let anonce: [u8; 32] = frame.data[17..49].try_into().unwrap();
             if anonce == [0; 32]
-                || self.challenge.as_ref().is_some_and(|c| {
-                    frame.replay < c.replay || (frame.replay == c.replay && c.anonce != anonce)
-                })
+                || active.is_some_and(|keys| keys.anonce == anonce)
+                || self
+                    .challenge
+                    .as_ref()
+                    .is_some_and(|c| c.anonce == anonce && frame.replay < c.replay)
             {
                 return Ok(None);
             }
@@ -196,13 +219,14 @@ impl Handshake {
                     anonce,
                     replay: frame.replay,
                     ptk,
+                    started: now,
                 });
             }
             let challenge = self.challenge.as_mut().unwrap();
             challenge.replay = frame.replay;
             return Ok(Some((
                 frame.reply(
-                    2 | PAIRWISE | MIC,
+                    2 | PAIRWISE | MIC | (frame.flags & SECURE),
                     Some(&challenge.snonce),
                     &RSN_PSK,
                     &challenge.ptk[..16],
@@ -220,15 +244,28 @@ impl Handshake {
         {
             return Ok(None);
         }
-        let (group, group_id) = unwrap_group(&frame, &challenge.ptk[16..32], true)?;
+        let offered_group = unwrap_group(&frame, &challenge.ptk[16..32], true)?;
+        let (group, group_id) = offered_group
+            .or_else(|| active.map(|keys| (keys.group, keys.group_id)))
+            .ok_or("No CCMP group key received")?;
+        let pair: [u8; 16] = challenge.ptk[32..48].try_into().unwrap();
+        if active.is_some_and(|keys| bool::from(pair.ct_eq(&keys.pair))) {
+            return Ok(None);
+        }
         let response = frame.reply(2 | PAIRWISE | MIC | SECURE, None, &[], &challenge.ptk[..16]);
+        let group_floor = offered_group.map_or(0, |_| group_rx_counter(&frame));
+        let rx_group = active
+            .filter(|keys| bool::from(group.ct_eq(&keys.group)))
+            .map_or([group_floor; 16], |keys| {
+                keys.rx_group.map(|last| last.max(group_floor))
+            });
         let keys = Keys {
-            pair: challenge.ptk[32..48].try_into().unwrap(),
+            pair,
             group,
             group_id,
             tx_pn: 0,
             rx_pair: [0; 16],
-            rx_group: [group_rx_counter(&frame); 16],
+            rx_group,
             kck: challenge.ptk[..16].try_into().unwrap(),
             kek: challenge.ptk[16..32].try_into().unwrap(),
             anonce: challenge.anonce,
@@ -244,7 +281,11 @@ fn group_rx_counter(frame: &KeyFrame<'_>) -> u64 {
     u64::from_le_bytes(raw)
 }
 
-fn unwrap_group(frame: &KeyFrame<'_>, kek: &[u8], require_rsn: bool) -> Result<([u8; 16], u8)> {
+fn unwrap_group(
+    frame: &KeyFrame<'_>,
+    kek: &[u8],
+    require_rsn: bool,
+) -> Result<Option<([u8; 16], u8)>> {
     let wrapped = &frame.data[HEADER..];
     if !(24..=1032).contains(&wrapped.len()) || wrapped.len() % 8 != 0 {
         return Err("Invalid WPA2 wrapped key length");
@@ -279,7 +320,7 @@ fn unwrap_group(frame: &KeyFrame<'_>, kek: &[u8], require_rsn: bool) -> Result<(
     if !rsn_ok {
         return Err("Access point changed its WPA2 parameters");
     }
-    group.ok_or("No CCMP group key received")
+    Ok(group)
 }
 
 pub struct Keys {
@@ -326,16 +367,21 @@ impl Keys {
             )));
         }
         if frame.flags == 2 | ACK | MIC | SECURE | ENCRYPTED {
-            let (group, id) = unwrap_group(&frame, &self.kek, false)?;
+            let (group, id) =
+                unwrap_group(&frame, &self.kek, false)?.ok_or("No CCMP group key received")?;
             let pn = group_rx_counter(&frame);
-            if !bool::from(group.ct_eq(&self.group)) || id != self.group_id {
+            if !bool::from(group.ct_eq(&self.group)) {
                 if frame.replay <= self.replay {
                     return Ok(None);
                 }
                 self.group.zeroize();
                 self.group = group;
-                self.group_id = id;
                 self.rx_group.fill(pn);
+            } else if frame.replay > self.replay {
+                self.rx_group = self.rx_group.map(|last| last.max(pn));
+            }
+            if frame.replay > self.replay {
+                self.group_id = id;
             }
             self.replay = frame.replay;
             return Ok(Some(frame.reply(2 | MIC | SECURE, None, &[], &self.kck)));
@@ -471,7 +517,7 @@ mod tests {
         );
         let anonce = [11; 32];
         let (reply, keys) = handshake
-            .advance(&message(2 | ACK | PAIRWISE, 3, &anonce, &[], None))
+            .advance(&message(2 | ACK | PAIRWISE, 3, &anonce, &[], None), None, 1)
             .unwrap()
             .unwrap();
         assert!(keys.is_none());
@@ -494,9 +540,13 @@ mod tests {
         let flags = 2 | ACK | PAIRWISE | MIC | INSTALL | SECURE | ENCRYPTED;
         let mut bad = message(flags, 4, &anonce, &wrapped, Some(&ptk[..16]));
         bad[81] ^= 1;
-        assert!(handshake.advance(&bad).unwrap().is_none());
+        assert!(handshake.advance(&bad, None, 2).unwrap().is_none());
         let (reply, keys) = handshake
-            .advance(&message(flags, 4, &anonce, &wrapped, Some(&ptk[..16])))
+            .advance(
+                &message(flags, 4, &anonce, &wrapped, Some(&ptk[..16])),
+                None,
+                2,
+            )
             .unwrap()
             .unwrap();
         assert!(KeyFrame::parse(&reply).unwrap().validate_mic(&ptk[..16]));
@@ -518,5 +568,92 @@ mod tests {
         tampered[9] ^= 1;
         assert!(keys.decrypt(&header, &tampered).is_none());
         assert_eq!(keys.rx_pair[0], 1);
+    }
+
+    #[test]
+    fn pairwise_rekey_requires_a_fresh_nonce_and_keeps_unchanged_group_counters() {
+        let sta = [2, 1, 2, 3, 4, 5];
+        let ap = [2, 6, 7, 8, 9, 10];
+        let mut handshake = Handshake::new(b"IEEE", b"password", sta, ap).unwrap();
+        let mut active = Keys {
+            pair: [0x41; 16],
+            group: [0x39; 16],
+            group_id: 1,
+            tx_pn: 55,
+            rx_pair: [32; 16],
+            rx_group: [127; 16],
+            kck: [0x81; 16],
+            kek: [0x43; 16],
+            anonce: [0x11; 32],
+            replay: 9,
+        };
+        active.rx_group[2] = 200;
+        assert!(handshake
+            .advance(
+                &message(2 | ACK | PAIRWISE, 10, &active.anonce, &[], None),
+                Some(&active),
+                1,
+            )
+            .unwrap()
+            .is_none());
+        let anonce = [0x55; 32];
+        assert!(handshake
+            .advance(
+                &message(2 | ACK | PAIRWISE, 8, &anonce, &[], None),
+                Some(&active),
+                1,
+            )
+            .unwrap()
+            .is_none());
+        let first = message(2 | ACK | PAIRWISE | SECURE, 11, &anonce, &[], None);
+        let (second, keys) = handshake
+            .advance(&first, Some(&active), 50)
+            .unwrap()
+            .unwrap();
+        assert!(keys.is_none());
+        assert_eq!(
+            u16::from_be_bytes(second[5..7].try_into().unwrap()),
+            2 | PAIRWISE | MIC | SECURE
+        );
+        let ptk = derive_ptk(
+            &handshake.pmk,
+            sta,
+            ap,
+            second[17..49].try_into().unwrap(),
+            &anonce,
+        );
+        let mut payload = [0; 48];
+        payload[..22].copy_from_slice(&RSN_PSK);
+        payload[22..30].copy_from_slice(&[0xdd, 22, 0, 15, 172, 1, 2, 0]);
+        payload[30..46].copy_from_slice(&active.group);
+        payload[46] = 0xdd;
+        let mut wrapped = [0; 56];
+        KekAes128::try_from(&ptk[16..32])
+            .unwrap()
+            .wrap(&payload, &mut wrapped)
+            .unwrap();
+        let third = message(
+            2 | ACK | PAIRWISE | MIC | INSTALL | SECURE | ENCRYPTED,
+            12,
+            &anonce,
+            &wrapped,
+            Some(&ptk[..16]),
+        );
+        let (fourth, replacement) = handshake
+            .advance(&third, Some(&active), 100)
+            .unwrap()
+            .unwrap();
+        assert!(KeyFrame::parse(&fourth).unwrap().validate_mic(&ptk[..16]));
+        let replacement = replacement.unwrap();
+        assert_ne!(replacement.pair, active.pair);
+        assert_eq!(replacement.tx_pn, 0);
+        assert_eq!(replacement.rx_pair, [0; 16]);
+        assert_eq!(replacement.rx_group, active.rx_group);
+        assert_eq!(replacement.group_id, 2);
+        assert_eq!(active.tx_pn, 55);
+        assert!(handshake
+            .advance(&third, Some(&active), 15_050)
+            .unwrap()
+            .is_none());
     }
 }

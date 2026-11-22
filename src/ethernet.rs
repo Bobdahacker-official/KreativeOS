@@ -130,7 +130,13 @@ impl Editor {
             return;
         }
         self.status = match storage::put(PROFILE, line.str().as_bytes()) {
+            Ok(()) if network.native_wifi() && storage::sync() => {
+                "Saved for the next Ethernet connection."
+            }
             Ok(()) if storage::sync() => "Applied and saved for the next boot.",
+            _ if network.native_wifi() => {
+                "Queued for Ethernet. The data disk could not save this profile."
+            }
             Ok(()) => "Applied. The data disk could not save this profile.",
             Err(_) => "Applied. No KFS file slot is available for this profile.",
         };

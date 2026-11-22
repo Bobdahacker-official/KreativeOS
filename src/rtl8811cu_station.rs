@@ -25,6 +25,7 @@ pub struct Station {
     rate: u8,
     seq: u16,
     keys: Option<Keys>,
+    handshake: Option<Handshake>,
     received: VecDeque<Vec<u8>>,
     alive: u64,
 }
@@ -71,6 +72,7 @@ pub fn join(
             rate: ap.basic_rates.trailing_zeros() as u8,
             seq: 0,
             keys: None,
+            handshake: None,
             received: VecDeque::new(),
             alive: hardware::millis(),
         };
@@ -113,6 +115,7 @@ pub fn join(
         })?;
         if let Some(mut handshake) = auth {
             io.finish_wpa2(&mut sta, &mut handshake)?;
+            sta.handshake = Some(handshake);
         }
         sta.alive = hardware::millis();
         Ok(sta)
@@ -332,16 +335,22 @@ impl<T: Usb> Registers<'_, T> {
                 let Some((header, body)) = sta.inbound(frame) else {
                     continue;
                 };
-                if header[1] & 0x40 != 0 || !body.starts_with(LLC) || body.get(6..8) != Some(&EAPOL)
+                if header[1] & 0x40 != 0
+                    || header[4..10] != sta.mac
+                    || !body.starts_with(LLC)
+                    || body.get(6..8) != Some(&EAPOL)
                 {
                     continue;
                 }
-                if let Some((reply, keys)) = handshake.advance(&body[8..])? {
+                if let Some((reply, keys)) =
+                    handshake.advance(&body[8..], None, hardware::millis())?
+                {
                     let ap = sta.ap;
                     let packet = sta.data_packet(ap, EAPOL, &reply, false)?;
                     self.send_packet(&packet, 17, sta.rate)?;
                     if keys.is_some() {
                         sta.keys = keys;
+                        handshake.complete();
                         return Ok(());
                     }
                 }
@@ -440,13 +449,8 @@ impl Station {
                     continue;
                 }
                 if body[6..8] == EAPOL {
-                    if let Some(keys) = &mut self.keys {
-                        if let Some(reply) = keys.replay_reply(&body[8..])? {
-                            let ap = self.ap;
-                            let packet =
-                                self.data_packet(ap, EAPOL, &reply, header[1] & 0x40 != 0)?;
-                            Registers(usb).send_packet(&packet, 17, self.rate)?;
-                        }
+                    if header[4..10] == self.mac {
+                        self.handle_eapol(usb, &body[8..], header[1] & 0x40 != 0)?;
                     }
                     continue;
                 }
@@ -466,6 +470,28 @@ impl Station {
         }
         if hardware::millis().wrapping_sub(self.alive) > 7000 {
             return Err("Native Wi-Fi beacons lost");
+        }
+        Ok(())
+    }
+    fn handle_eapol(&mut self, usb: &mut impl Usb, eapol: &[u8], protected: bool) -> Result {
+        let (Some(handshake), Some(keys)) = (&mut self.handshake, &mut self.keys) else {
+            return Ok(());
+        };
+        let reply = if let Some(reply) = keys.replay_reply(eapol)? {
+            Some((reply, None))
+        } else {
+            handshake.advance(eapol, Some(keys), hardware::millis())?
+        };
+        if let Some((reply, replacement)) = reply {
+            let packet = self.data_packet(self.ap, EAPOL, &reply, protected)?;
+            Registers(usb).send_packet(&packet, 17, self.rate)?;
+            if let Some(keys) = replacement {
+                // The access point is still using the old PTK until it receives message 4.
+                self.keys = Some(keys);
+                if let Some(handshake) = &mut self.handshake {
+                    handshake.complete();
+                }
+            }
         }
         Ok(())
     }
@@ -503,6 +529,7 @@ mod tests {
             rate: 0,
             seq: 1,
             keys: None,
+            handshake: None,
             received: VecDeque::new(),
             alive: 0,
         };

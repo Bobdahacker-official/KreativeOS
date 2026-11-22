@@ -49,7 +49,7 @@ pub struct Network {
     next_hop: Address,
     io: u16,
     pci_adapter: Option<PciAdapter>,
-    wired_mac: Option<[u8; 6]>,
+    wired: Option<WiredNetwork>,
     pub wifi: crate::wifi::Module,
     pub response: Option<crate::web::Response>,
     pub mac: [u8; 6],
@@ -83,6 +83,12 @@ pub struct Network {
     retries: u8,
     last: [u8; 1536],
     last_len: usize,
+}
+struct WiredNetwork {
+    mac: [u8; 6],
+    config: Config,
+    vlan: u16,
+    automatic: bool,
 }
 enum PciAdapter {
     Intel(crate::e1000::Adapter),
@@ -167,7 +173,7 @@ impl Network {
             response: None,
             http_bytes: Vec::new(),
             pci_adapter: None,
-            wired_mac: None,
+            wired: None,
             mac: [0; 6],
             received: 0,
             sent: 0,
@@ -318,7 +324,7 @@ impl Network {
         }
     }
     pub fn native_wifi(&self) -> bool {
-        self.wired_mac.is_some()
+        self.wired.is_some()
     }
     pub fn join_native(&mut self, ssid: &str, pass: &str) -> Result<(), &'static str> {
         self.clear_browser_session();
@@ -332,12 +338,17 @@ impl Network {
                 return Err(error);
             }
         };
-        if self.wired_mac.is_none() {
-            self.wired_mac = Some(self.mac);
+        if self.wired.is_none() {
+            self.wired = Some(WiredNetwork {
+                mac: self.mac,
+                config: self.config,
+                vlan: self.vlan,
+                automatic: self.dhcp.is_some() || self.lease.is_some(),
+            });
         }
         self.mac = mac;
         self.link_up = false;
-        self.start_dhcp(0);
+        self.begin_dhcp(0);
         self.status = "Native Wi-Fi connected. Looking for an IPv4 lease.";
         Ok(())
     }
@@ -350,24 +361,40 @@ impl Network {
         }
     }
     fn restore_wired(&mut self) {
-        if let Some(mac) = self.wired_mac.take() {
-            self.mac = mac;
+        if let Some(wired) = self.wired.take() {
+            self.mac = wired.mac;
+            // Abort the wireless request before the wired NIC becomes active again.
             self.state = 0;
-            self.raw.clear();
-            self.raw_eof = false;
-            self.raw_waiting = false;
-            self.tls_pending = false;
+            self.clear_browser_session();
             self.link_up = false;
             self.config = Config::UNCONFIGURED;
+            self.vlan = wired.vlan;
             self.dhcp = None;
             self.lease = None;
             self.neighbors.fill(None);
-            self.changed = true;
-            crate::ethernet::configure_at_boot(self);
+            self.ethernet_status = "IPv4 not configured";
+            if wired.automatic {
+                self.start_dhcp(wired.vlan);
+            } else if wired.config.valid() {
+                self.static_config(wired.config, wired.vlan);
+            }
         }
     }
     pub fn static_config(&mut self, config: Config, vlan: u16) -> bool {
-        if !self.online() || self.state != 0 || vlan > 4094 || !config.valid() {
+        if vlan > 4094 || !config.valid() {
+            return false;
+        }
+        let available = self.io != 0 || self.pci_adapter.is_some();
+        if !available {
+            return false;
+        }
+        if let Some(wired) = &mut self.wired {
+            wired.config = config;
+            wired.vlan = vlan;
+            wired.automatic = false;
+            return true;
+        }
+        if self.state != 0 {
             return false;
         }
         self.config = config;
@@ -379,9 +406,29 @@ impl Network {
         true
     }
     pub fn start_dhcp(&mut self, vlan: u16) -> bool {
-        if !self.online() || self.state != 0 || vlan > 4094 {
+        if vlan > 4094 || (self.io == 0 && self.pci_adapter.is_none()) {
             return false;
         }
+        if let Some(wired) = &mut self.wired {
+            wired.config = Config::UNCONFIGURED;
+            wired.vlan = vlan;
+            wired.automatic = true;
+            return true;
+        }
+        if self.state != 0 {
+            return false;
+        }
+        self.begin_dhcp(vlan);
+        true
+    }
+    pub fn renew_ipv4(&mut self) -> bool {
+        if !self.online() || self.state != 0 {
+            return false;
+        }
+        self.begin_dhcp(self.vlan);
+        true
+    }
+    fn begin_dhcp(&mut self, vlan: u16) {
         self.vlan = vlan;
         self.config = Config::UNCONFIGURED;
         self.lease = None;
@@ -393,7 +440,6 @@ impl Network {
             attempt: 0,
             deadline: millis(),
         });
-        true
     }
     fn dhcp_tick(&mut self) {
         let now = millis();
@@ -405,7 +451,7 @@ impl Network {
             if self.state != 0 {
                 self.fail("Ethernet DHCP lease expired");
             }
-            self.start_dhcp(self.vlan);
+            self.begin_dhcp(self.vlan);
         }
         if self.dhcp.is_none()
             && self
@@ -516,7 +562,7 @@ impl Network {
             if self.state != 0 {
                 self.fail("DHCP server revoked the IPv4 lease");
             }
-            self.start_dhcp(self.vlan);
+            self.begin_dhcp(self.vlan);
             if let Some(next) = &mut self.dhcp {
                 next.deadline = now + 1000;
             }

@@ -2123,10 +2123,10 @@ impl Desktop {
                             self.open(8);
                         } else if px < 252 {
                             if self.users.administrator() {
-                                self.notice.set(if n.start_dhcp(n.vlan) {
+                                self.notice.set(if n.renew_ipv4() {
                                     "DHCP discovery started"
                                 } else {
-                                    "Ethernet is unavailable or busy"
+                                    "Network is unavailable or busy"
                                 });
                             }
                         } else {
