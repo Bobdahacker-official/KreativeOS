@@ -7,6 +7,8 @@ share a small software renderer with no window server, browser runtime or deskto
 
 ![KreativeOS home screen on a phone-shaped display](images/home-arm64.png)
 
+[Tablet home screen](images/home-amd64.png) · [Notes with the touch keyboard](images/notes-arm64.png) · [Terminal](images/terminal-amd64.png)
+
 ## Download and boot
 
 | Target | Download | Boot equipment |
