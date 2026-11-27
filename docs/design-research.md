@@ -8,3 +8,8 @@
 | Terminal | A Linux PTY provides the controlling terminal, process I/O and window size. Libvterm models the terminal screen, ANSI colors, cursor, scrollback, and alternate screen. [Linux forkpty](https://man7.org/linux/man-pages/man3/forkpty.3.html) · [libvterm API](https://github.com/neovim/libvterm/blob/nvim/include/vterm.h) |
 | Accounts | The first boot creates an owner account. Linux UIDs, private home directories, yescrypt hashes, and a root-only account file separate users. The owner password authorizes additional accounts. [Linux shadow format](https://man7.org/linux/man-pages/man5/shadow.5.html) · [libxcrypt](https://github.com/besser82/libxcrypt) |
 | Networking | Linux Ethernet drivers and BusyBox DHCP provide wired configuration. WPA Supplicant provides the Wi-Fi control interface for scanning and association. The image includes selected Intel, Broadcom, and Realtek firmware. [WPA Supplicant](https://w1.fi/wpa_supplicant/) · [Linux wireless drivers](https://wireless.docs.kernel.org/en/latest/en/users/drivers.html) |
+
+The launcher uses an edge-to-edge home screen and visible gesture area informed by
+[Android system bar guidance](https://developer.android.com/design/ui/mobile/guides/foundations/system-bars).
+Launcher icons use a consistent shape and distinct colors, drawing on
+[Android launcher icon guidance](https://codelabs.developers.google.com/design-android-launcher).

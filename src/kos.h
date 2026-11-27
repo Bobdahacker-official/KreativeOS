@@ -66,7 +66,7 @@ typedef struct {
     Display *d;
     bool light, keyboard, shift, symbols, control, running, redraw, pointer, show_pointer, list_dirty;
     int scroll, mx, my, start_x, start_y, start_scroll, exit_code;
-    bool dragged, arranging, swipe_horizontal, drawer, tasks;
+    bool dragged, arranging, swipe_horizontal, drawer, tasks, delete_note;
     App recent[APP_COUNT]; int recent_count;
     int order[APP_COUNT], selection, page;
     double page_position, page_start;
@@ -82,7 +82,7 @@ typedef struct {
     bool stopwatch_running, confirm_power;
     char wifi_ssid[33], wifi_password[65], wifi_results[12][33], network_status[192];
     bool wifi_secured[12], wifi_edit, wifi_open;
-    int wifi_count;
+    int wifi_count, wifi_retries;
 } State;
 
 typedef struct {
@@ -115,6 +115,7 @@ void inputs_poll(Inputs *, State *);
 void inputs_close(Inputs *);
 
 bool notes_save(State *);
+bool notes_delete(State *);
 void notes_list(State *);
 void notes_open(State *, const char *);
 void notes_new(State *);

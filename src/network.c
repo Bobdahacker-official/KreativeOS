@@ -112,7 +112,7 @@ static bool wifi_configure(Pending *pending, const char *iface, const Request *r
     secret[used] = 0;
     snprintf(cmd, sizeof(cmd), "SET_NETWORK %ld ssid %s", id, ssid);
     bool ok = command_ok(iface, cmd);
-    snprintf(cmd, sizeof(cmd), "SET_NETWORK %ld key_mgmt %s", id, request->open ? "NONE" : "WPA-PSK SAE");
+    snprintf(cmd, sizeof(cmd), "SET_NETWORK %ld key_mgmt %s", id, request->open ? "NONE" : "WPA-PSK");
     ok = ok && command_ok(iface, cmd);
     if (!request->open) {
         snprintf(cmd, sizeof(cmd), "SET_NETWORK %ld psk \"%s\"", id, secret);
@@ -266,7 +266,8 @@ void network_scan(State *s)
     Request scan = { .action = WIFI_SCAN };
     if (request(&scan, reply, sizeof(reply))) snprintf(s->message, sizeof(s->message), "%.95s", reply);
     else strcpy(s->message, "Use the host network settings on this installation.");
-    s->wifi_scan_at = s->now + 2200;
+    s->wifi_retries = 5;
+    s->wifi_scan_at = s->now + 5000;
 }
 
 static unsigned hex_digit(char c)
@@ -321,7 +322,15 @@ void network_refresh(State *s)
         strcpy(s->wifi_results[s->wifi_count], decoded);
         s->wifi_secured[s->wifi_count++] = strstr(flags, "WPA") || strstr(flags, "WEP");
     }
-    strcpy(s->message, s->wifi_count ? "" : "No Wi-Fi networks found");
+    if (s->wifi_count) {
+        s->message[0] = 0;
+        s->wifi_retries = 0;
+    } else if (s->wifi_retries-- > 0) {
+        strcpy(s->message, "Scanning for Wi-Fi networks...");
+        s->wifi_scan_at = s->now + 5000;
+    } else {
+        strcpy(s->message, "No Wi-Fi networks found");
+    }
     s->redraw = true;
 }
 

@@ -17,13 +17,13 @@
 
 typedef struct { uint32_t ink, muted, card, dim, edge, accent, on_accent, nav; } Colors;
 static const struct { App app; const char *name; uint32_t tint; } apps[] = {
-    { NOTES, "Notes", 0xffe9bd },
-    { TERMINAL, "Terminal", 0xd6f3e6 },
-    { FILES, "Files", 0xdfe9ff },
-    { CALCULATOR, "Calculator", 0xfce2ed },
-    { CLOCK, "Clock", 0xd4f0f6 },
-    { NETWORK, "Network", 0xdfdeff },
-    { SETTINGS, "Settings", 0xeae5f8 },
+    { NOTES, "Notes", 0xffb347 },
+    { TERMINAL, "Terminal", 0x69d2bb },
+    { FILES, "Files", 0x88b4ef },
+    { CALCULATOR, "Calculator", 0xfa91ab },
+    { CLOCK, "Clock", 0x7bc6e4 },
+    { NETWORK, "Network", 0xaa98f0 },
+    { SETTINGS, "Settings", 0xb3bac9 },
 };
 
 static Colors colors(const State *s)
@@ -146,27 +146,17 @@ static void draw_home(State *s)
     Colors c = colors(s);
     int x = home_inset(s), y = TOP + 12, w = home_width(s), h = hero_height(s);
     bool compact = h <= 108;
-    uint32_t hero = s->light ? 0xeae6ff : 0x29214b;
-    round_box(d, rect(x, y, w, h), 24, hero);
-    int r = compact ? 32 : min(61, w / 6);
-    int px = x + w - r - 13, py = y + h / 2;
-    circle(d, px, py, r, s->light ? 0xded4ff : 0x40346c);
-    circle(d, px - 9, py, r * 7 / 10, s->light ? 0xbca7f6 : 0x6252a0);
-    circle(d, px - 13, py - 6, r * 2 / 5, s->light ? 0x8d72e7 : 0xa482e9);
-    line(d, px - r + 3, py + r * 2 / 3, px + r * 2 / 3, py - r * 2 / 3,
-         s->light ? 0x7462b9 : 0xe2d6ff);
-    circle(d, px + r / 2, py - r * 3 / 5, 4, 0xffb96e);
     time_t stamp = time(NULL);
     struct tm local;
     char date[48], now[10];
     if (localtime_r(&stamp, &local)) {
         strftime(now, sizeof(now), "%H:%M", &local);
-        strftime(date, sizeof(date), "%A, %d %B", &local);
+        strftime(date, sizeof(date), "%A  %d %B", &local);
         const char *greet = local.tm_hour < 12 ? "Good morning" :
                             local.tm_hour < 18 ? "Good afternoon" : "Good evening";
-        if (!compact) text(d, x + 22, y + h / 5, greet, FACE_STRONG, c.ink, px - r + 14);
-        text(d, x + 20, y + (compact ? 5 : h / 5 + 25), now, FACE_DISPLAY, c.ink, px - r + 14);
-        text(d, x + 23, y + (compact ? 57 : h / 5 + 83), date, FACE_REGULAR, c.muted, px - r + 14);
+        text(d, x + 5, y + (compact ? 2 : 12), greet, FACE_REGULAR, 0xe5e9f4, x + w);
+        text(d, x + 2, y + (compact ? 20 : 34), now, FACE_DISPLAY, 0xffffff, x + w);
+        if (!compact) text(d, x + 5, y + 93, date, FACE_REGULAR, 0xf1f2f8, x + w);
     }
     if (s->drawer || s->tasks) {
         round_box(d, rect(8, TOP + 4, d->w - 16, bottom(s) - TOP - 8), 24, c.nav);
@@ -552,20 +542,30 @@ static void draw_chrome(State *s)
     Display *d = s->d;
     Colors c = colors(s);
     int x = margin(s);
-    box(d, rect(0, 0, d->w, TOP), c.nav);
-    box(d, rect(0, TOP - 1, d->w, 1), c.edge);
-    if (s->app == HOME || s->app == AUTH) {
+    bool home = s->app == HOME && !s->drawer && !s->tasks;
+    if (!home) {
+        box(d, rect(0, 0, d->w, TOP), c.nav);
+        box(d, rect(0, TOP - 1, d->w, 1), c.edge);
+    }
+    if (s->app == AUTH) {
         round_box(d, rect(x, 11, 32, 32), 11, c.accent);
         stroke(d, x + 10, 20, x + 10, 33, c.on_accent);
         stroke(d, x + 10, 28, x + 21, 19, c.on_accent);
         stroke(d, x + 12, 27, x + 21, 34, c.on_accent);
         text(d, x + 42, 15, "KreativeOS", FACE_STRONG, c.ink, d->w - x);
+    } else if (s->app == HOME) {
+        text(d, x, 15, "KreativeOS", FACE_STRONG, 0xffffff, d->w - x);
     } else {
         text(d, x, 15, app_name(s->app), FACE_STRONG, c.ink, d->w - x);
     }
-    if (s->app == HOME) button(s, top_button(s, 0), s->arranging ? "Done" : "Arrange", s->arranging);
+    if (s->app == HOME) {
+        Rect edit = top_button(s, 0);
+        round_box(d, edit, 16, s->arranging ? c.accent : 0x263951);
+        centered(d, edit, s->arranging ? "Done" : "Edit", FACE_REGULAR, 0xffffff);
+    }
     if (s->app == NOTES) {
         if (s->note.open) {
+            button(s, top_button(s, 2), s->delete_note ? "Confirm" : "Delete", s->delete_note);
             button(s, top_button(s, 1), "Notes list", false);
             button(s, top_button(s, 0), s->note.editing_name ? "Start" : "Save", true);
         } else button(s, top_button(s, 0), "New", true);
@@ -591,8 +591,13 @@ static void draw_chrome(State *s)
                    (key.key == SYMBOL_UI && s->symbols) || (key.key == CTRL_UI && s->control));
         }
     }
-    box(d, rect(0, d->h - NAV, d->w, NAV), c.nav);
-    box(d, rect(0, d->h - NAV, d->w, 1), c.edge);
+    if (home) {
+        int width = min(d->w - 24, 430);
+        round_box(d, rect((d->w - width) / 2, d->h - NAV + 2, width, NAV - 6), 23, 0x23354b);
+    } else {
+        box(d, rect(0, d->h - NAV, d->w, NAV), c.nav);
+        box(d, rect(0, d->h - NAV, d->w, 1), c.edge);
+    }
     if (s->app == AUTH) {
         if (s->login.field > 0)
             button(s, auth_toggle(s), s->login.show ? "Hide password" : "Show password", false);
@@ -601,7 +606,7 @@ static void draw_chrome(State *s)
         for (int i = 0; i < 3; i++) {
             Rect r = nav_button(s, i);
             if (i == 0) {
-                centered(d, r, "Home", FACE_REGULAR, c.ink);
+                centered(d, r, "Home", FACE_REGULAR, home ? 0xffffff : c.ink);
             } else {
                 int index = s->order[i - 1];
                 icon(d, r.x + (r.w - 43) / 2, r.y, apps[index].app, apps[index].tint);
@@ -616,7 +621,8 @@ static void draw_chrome(State *s)
 
 void ui_draw(State *s)
 {
-    wallpaper(s->d, s->light);
+    if (s->app == HOME) wallpaper(s->d, s->light);
+    else box(s->d, rect(0, 0, s->d->w, s->d->h), colors(s).dim);
     switch (s->app) {
     case HOME: draw_home(s); break;
     case NOTES: draw_note(s); break;
@@ -659,6 +665,7 @@ static void go(State *s, App app)
     s->keyboard = s->shift = s->symbols = s->control = s->confirm_power = false;
     s->message[0] = 0;
     s->arranging = false;
+    s->delete_note = false;
     s->selection = -1;
     s->wifi_edit = false;
     explicit_bzero(s->wifi_password, sizeof(s->wifi_password));
@@ -918,7 +925,10 @@ static void click(State *s)
             if (s->wifi_edit) network_connect(s);
             else network_scan(s);
         } else if (s->app == NOTES) {
-            if (hit(s, top_button(s, 0))) {
+            if (s->note.open && hit(s, top_button(s, 2))) {
+                if (s->delete_note) { notes_delete(s); s->delete_note = false; }
+                else { s->delete_note = true; strcpy(s->message, "Tap Confirm to delete this note"); }
+            } else if (hit(s, top_button(s, 0))) {
                 if (!s->note.open) notes_new(s);
                 else if (s->note.editing_name) begin_note(s);
                 else notes_save(s);
@@ -1247,6 +1257,14 @@ int ui_test(void)
     ui_draw(&s);
     tap(&s, note_card(&s, 0));
     if (!s.note.open || strcmp(s.note.text, "KreativeOS\nWrite!") != 0) goto fail;
+    failure = "delete a note with confirmation";
+    tap(&s, top_button(&s, 2));
+    if (!s.delete_note || !s.note.open) goto fail;
+    tap(&s, top_button(&s, 2));
+    if (s.note.open || s.delete_note) goto fail;
+    char deleted[256];
+    snprintf(deleted, sizeof(deleted), "%s/note.txt", test_dir);
+    if (access(deleted, F_OK) == 0) goto fail;
     failure = "interactive PTY, pipeline and foreground stdin";
     tap(&s, nav_button(&s, 2));
     ui_draw(&s);

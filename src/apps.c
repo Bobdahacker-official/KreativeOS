@@ -154,6 +154,26 @@ bool notes_save(State *s)
     return ok;
 }
 
+bool notes_delete(State *s)
+{
+    if (!s->note.open || !valid_name(s->note.name)) return false;
+    int dir = data_dir(s);
+    if (dir < 0) return false;
+    char file[52];
+    note_file(file, s->note.name);
+    bool ok = unlinkat(dir, file, 0) == 0;
+    if (ok) fsync(dir);
+    close(dir);
+    if (ok) {
+        s->note = (Note){0};
+        s->keyboard = false;
+        s->list_dirty = true;
+        s->scroll = 0;
+        strcpy(s->message, "Note deleted");
+    } else strcpy(s->message, "Could not delete this note");
+    return ok;
+}
+
 typedef struct { const char *p; bool valid; unsigned depth; } Parser;
 
 static void spaces(Parser *p)

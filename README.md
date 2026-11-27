@@ -73,7 +73,7 @@ single-touch absolute events or the first slot of a Linux type-B multitouch devi
 
 - **Notes** creates, edits and reopens plain-text documents. Edits autosave to
   ext4 or to the Pi data directory. Use the touch keyboard, a physical
-  keyboard, or both. Tap the body to place the caret.
+  keyboard, or both. Tap the body to place the caret. Delete a note from its toolbar and confirm.
 - **Terminal** opens an interactive Linux PTY under the signed-in account. It
   supports ANSI colors, cursor movement, scrollback, command history, foreground
   programs, and terminal resizing. Tap the prompt for the on-screen keyboard.
@@ -85,7 +85,7 @@ single-touch absolute events or the first slot of a Linux type-B multitouch devi
 - **Clock** shows local time and includes a stopwatch.
 - **Network** shows active IPv4. Ethernet uses DHCP automatically. Tap **Scan**
   to scan Wi-Fi, select an access point, then enter its password when requested.
-  The standalone image supports open and WPA2/WPA3 Personal networks and
+  The standalone image supports open and WPA2 Personal networks and
   saves a successful association for the next boot. Hardware coverage depends on the bundled Linux drivers and firmware.
 - **Settings** changes appearance, shows device and session information, and
   signs out or shuts down the standalone image.
