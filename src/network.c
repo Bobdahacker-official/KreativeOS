@@ -120,8 +120,6 @@ static bool wifi_configure(Pending *pending, const char *iface, const Request *r
     }
     explicit_bzero(secret, sizeof(secret));
     explicit_bzero(cmd, sizeof(cmd));
-    snprintf(cmd, sizeof(cmd), "SET_NETWORK %ld scan_ssid 1", id);
-    ok = ok && command_ok(iface, cmd);
     snprintf(cmd, sizeof(cmd), "SELECT_NETWORK %ld", id);
     ok = ok && command_ok(iface, cmd);
     if (!ok) {
@@ -129,7 +127,7 @@ static bool wifi_configure(Pending *pending, const char *iface, const Request *r
         command_ok(iface, cmd);
     } else {
         pending->id = (int)id;
-        pending->until = time(NULL) + 25;
+        pending->until = time(NULL) + 60;
         strcpy(pending->iface, iface);
         strcpy(pending->state, "Joining Wi-Fi");
     }
