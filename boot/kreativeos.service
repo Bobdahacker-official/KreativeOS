@@ -1,0 +1,24 @@
+[Unit]
+Description=KreativeOS touchscreen session
+After=local-fs.target systemd-udevd.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+User=kreativeos
+Group=kreativeos
+SupplementaryGroups=video input
+StateDirectory=kreativeos
+Environment=KOS_DATA=/var/lib/kreativeos
+EnvironmentFile=-/etc/default/kreativeos
+ExecStart=/usr/local/lib/kreativeos/kreative-shell
+Restart=on-failure
+RestartSec=3s
+SuccessExitStatus=42
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
