@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <signal.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -15,19 +16,20 @@
 #define ROW 23
 
 typedef struct { uint32_t ink, muted, card, dim, edge, accent, on_accent, nav; } Colors;
-static const struct { App app; const char *name, *detail; uint32_t tint; } apps[] = {
-    { NOTES, "Notes", "Write and keep plain text", 0xf6c871 },
-    { TERMINAL, "Terminal", "Run system commands", 0x99e6bd },
-    { FILES, "Files", "Browse saved documents", 0xa8baff },
-    { CALCULATOR, "Calculator", "Work out an expression", 0xf0a7c4 },
-    { CLOCK, "Clock", "Local time and stopwatch", 0x8cdbef },
-    { SETTINGS, "Settings", "Appearance and device info", 0xc4b2fb },
+static const struct { App app; const char *name; uint32_t tint; } apps[] = {
+    { NOTES, "Notes", 0xffe9bd },
+    { TERMINAL, "Terminal", 0xd6f3e6 },
+    { FILES, "Files", 0xdfe9ff },
+    { CALCULATOR, "Calculator", 0xfce2ed },
+    { CLOCK, "Clock", 0xd4f0f6 },
+    { NETWORK, "Network", 0xdfdeff },
+    { SETTINGS, "Settings", 0xeae5f8 },
 };
 
 static Colors colors(const State *s)
 {
-    if (s->light) return (Colors){0x171731, 0x474c65, 0xffffff, 0xe4e8f6, 0xcad0e4,
-                                  0x5337ad, 0xffffff, 0xecedf9};
+    if (s->light) return (Colors){0x1b2034, 0x575e73, 0xffffff, 0xeff0f7, 0xe0e2ee,
+                                  0x5241c8, 0xffffff, 0xf8f8fc};
     return (Colors){0xf8f6ff, 0xb8b9d2, 0x252842, 0x1b1e35, 0x393d5a,
                     0xd8cbff, 0x201636, 0x191b30};
 }
@@ -38,7 +40,12 @@ static int margin(const State *s) { return s->d->w < 500 ? 16 : 28; }
 static int rel_width(const State *s) { return s->d->w - margin(s) * 2; }
 static int key_height(const State *s) { return s->d->h < 380 ? 22 : s->d->h < 465 ? 28 : 38; }
 static int bottom(const State *s) { return s->d->h - NAV - (s->keyboard ? key_height(s) * 5 + 6 : 0); }
-static int columns(const State *s) { return s->d->w >= 940 ? 3 : s->d->w >= 540 ? 2 : 1; }
+static int columns(const State *s) { return s->d->w >= 610 || s->d->h < 475 ? 4 : 2; }
+static int home_inset(const State *s) { return max(margin(s), (s->d->w - 880) / 2); }
+static int home_width(const State *s) { return s->d->w - home_inset(s) * 2; }
+static int hero_height(const State *s) { return s->d->h < 475 ? 84 : s->d->h < 550 ? 108 : s->d->h < 610 ? 150 : 194; }
+#define PAGE_SIZE 4
+#define PAGE_COUNT ((APP_COUNT + PAGE_SIZE - 1) / PAGE_SIZE)
 
 static const char *app_name(App app)
 {
@@ -100,6 +107,14 @@ static void icon(Display *d, int x, int y, App app, uint32_t tint)
         stroke(d, x + 12, y + 7, x + 12, y + 12, fg);
         stroke(d, x + 12, y + 12, x + 16, y + 15, fg);
         break;
+    case NETWORK:
+        for (int i = 0; i < 3; i++) {
+            int yoff = 6 + i * 5, width = 10 - i * 3;
+            stroke(d, x + 12 - width, y + yoff, x + 12, y + yoff - 3, fg);
+            stroke(d, x + 12, y + yoff - 3, x + 12 + width, y + yoff, fg);
+        }
+        circle(d, x + 12, y + 19, 2, fg);
+        break;
     case SETTINGS:
         for (int i = 0; i < 3; i++) {
             box(d, rect(x + 2, y + 5 + i * 7, 21, 2), fg);
@@ -112,45 +127,75 @@ static void icon(Display *d, int x, int y, App app, uint32_t tint)
 
 static Rect app_card(const State *s, int index)
 {
-    int cols = columns(s);
-    int w = (rel_width(s) - 10 * (cols - 1)) / cols;
-    return rect(margin(s) + (index % cols) * (w + 10), TOP + 177 + (index / cols) * 76 - s->scroll, w, 67);
+    int cols = columns(s), pos = index % PAGE_SIZE, page = index / PAGE_SIZE;
+    int gap = 10, width = home_width(s), w = (width - gap * (cols - 1)) / cols;
+    int y = TOP + 27 + hero_height(s) + (pos / cols) * 106;
+    return rect(home_inset(s) + (pos % cols) * (w + gap) +
+                (int)lround((page - s->page_position) * s->d->w), y, w, 96);
+}
+
+static Rect page_dot(const State *s, int page)
+{
+    int y = TOP + 29 + hero_height(s) + (PAGE_SIZE / columns(s)) * 106;
+    return rect(s->d->w / 2 - 48 + page * 48, y, 48, 41);
 }
 
 static void draw_home(State *s)
 {
     Display *d = s->d;
     Colors c = colors(s);
-    int x = margin(s), y = TOP + 10 - s->scroll, w = rel_width(s);
-    Rect hero = rect(x, y, w, 127);
-    round_box(d, hero, 22, s->light ? 0xddd5fc : 0x302759);
-    int px = x + w - 52, py = y + 64;
-    circle(d, px, py, 38, s->light ? 0xc6b4fc : 0x51417f);
-    circle(d, px - 5, py - 2, 26, s->light ? 0x9780e4 : 0x7864bd);
-    circle(d, px - 10, py - 6, 13, 0xded0ff);
-    stroke(d, px - 35, py + 26, px + 27, py - 27, s->light ? 0x6046ab : 0xb8a3f9);
-    circle(d, px + 17, py - 31, 3, 0xf6c871);
-    text(d, x + 17, y + 18, "KreativeOS", FACE_STRONG, c.ink, px - 39);
+    int x = home_inset(s), y = TOP + 12, w = home_width(s), h = hero_height(s);
+    bool compact = h <= 108;
+    uint32_t hero = s->light ? 0xeae6ff : 0x29214b;
+    round_box(d, rect(x, y, w, h), 24, hero);
+    int r = compact ? 32 : min(61, w / 6);
+    int px = x + w - r - 13, py = y + h / 2;
+    circle(d, px, py, r, s->light ? 0xded4ff : 0x40346c);
+    circle(d, px - 9, py, r * 7 / 10, s->light ? 0xbca7f6 : 0x6252a0);
+    circle(d, px - 13, py - 6, r * 2 / 5, s->light ? 0x8d72e7 : 0xa482e9);
+    line(d, px - r + 3, py + r * 2 / 3, px + r * 2 / 3, py - r * 2 / 3,
+         s->light ? 0x7462b9 : 0xe2d6ff);
+    circle(d, px + r / 2, py - r * 3 / 5, 4, 0xffb96e);
     time_t stamp = time(NULL);
     struct tm local;
     char date[48], now[10];
     if (localtime_r(&stamp, &local)) {
         strftime(now, sizeof(now), "%H:%M", &local);
         strftime(date, sizeof(date), "%A, %d %B", &local);
-        text(d, x + 16, y + 39, now, FACE_DISPLAY, c.ink, px - 32);
-        text(d, x + 18, y + 94, date, FACE_REGULAR, c.muted, px - 35);
+        const char *greet = local.tm_hour < 12 ? "Good morning" :
+                            local.tm_hour < 18 ? "Good afternoon" : "Good evening";
+        if (!compact) text(d, x + 22, y + h / 5, greet, FACE_STRONG, c.ink, px - r + 14);
+        text(d, x + 20, y + (compact ? 5 : h / 5 + 25), now, FACE_DISPLAY, c.ink, px - r + 14);
+        text(d, x + 23, y + (compact ? 57 : h / 5 + 83), date, FACE_REGULAR, c.muted, px - r + 14);
     }
-    text(d, x + 2, y + 138, "Apps", FACE_STRONG, c.ink, x + w);
-    for (size_t i = 0; i < ARRAY_LEN(apps); i++) {
-        Rect r = app_card(s, (int)i);
-        if (r.y + r.h < TOP || r.y >= bottom(s)) continue;
-        round_box(d, r, 16, c.card);
-        icon(d, r.x + 11, r.y + 12, apps[i].app, apps[i].tint);
-        text(d, r.x + 65, r.y + 11, apps[i].name, FACE_STRONG, c.ink, r.x + r.w - 20);
-        text(d, r.x + 65, r.y + 38, apps[i].detail, FACE_REGULAR, c.muted, r.x + r.w - 16);
-        if (r.w > 230) {
-            line(d, r.x + r.w - 19, r.y + 29, r.x + r.w - 14, r.y + 34, c.muted);
-            line(d, r.x + r.w - 14, r.y + 34, r.x + r.w - 19, r.y + 39, c.muted);
+    if (s->drawer || s->tasks) {
+        round_box(d, rect(8, TOP + 4, d->w - 16, bottom(s) - TOP - 8), 24, c.nav);
+        text(d, 25, TOP + 19, s->tasks ? "Recent apps" : "All apps", FACE_STRONG, c.ink, d->w - 25);
+        int count = s->tasks ? s->recent_count : APP_COUNT;
+        int cols = columns(s);
+        int step = (d->w - 42) / cols;
+        for (int i = 0; i < count; i++) {
+            int idx = s->tasks ? 0 : s->order[i];
+            if (s->tasks) for (int j = 0; j < APP_COUNT; j++) if (apps[j].app == s->recent[i]) idx = j;
+            Rect tile = rect(21 + i % cols * step, TOP + 57 + i / cols * 96, step - 5, 91);
+            icon(d, tile.x + (tile.w - 43) / 2, tile.y + 8, apps[idx].app, apps[idx].tint);
+            centered(d, rect(tile.x, tile.y + 54, tile.w, 30), apps[idx].name, FACE_REGULAR, c.ink);
+        }
+        return;
+    }
+    for (int i = 0; i < APP_COUNT; i++) {
+        Rect tile = app_card(s, i);
+        if (tile.x + tile.w <= 0 || tile.x >= d->w || tile.y >= bottom(s)) continue;
+        int index = s->order[i];
+        bool selected = i == s->selection;
+        if (selected) round_box(d, tile, 19, c.accent);
+        icon(d, tile.x + (tile.w - 43) / 2, tile.y + 12, apps[index].app, apps[index].tint);
+        centered(d, rect(tile.x, tile.y + 57, tile.w, 30), apps[index].name, FACE_REGULAR, 0xffffff);
+    }
+    if (page_dot(s, 0).y + 24 < bottom(s)) {
+        for (int p = 0; p < PAGE_COUNT; p++) {
+            Rect hit = page_dot(s, p);
+            circle(d, hit.x + hit.w / 2, hit.y + 14, p == s->page ? 5 : 4, p == s->page ? c.accent : c.edge);
         }
     }
 }
@@ -219,10 +264,7 @@ static int cursor_line(const char *buf, size_t length, size_t cursor, int cols, 
 
 static int text_cols(const State *s) { return min(720, max(1, (rel_width(s) - 24) / 9)); }
 static int note_top(void) { return TOP + 67; }
-static int terminal_top(void) { return TOP + 12; }
-static int terminal_input(const State *s) { return bottom(s) - 47; }
 static int note_rows(const State *s) { return max(1, (bottom(s) - note_top() - 22) / ROW); }
-static int terminal_rows(const State *s) { return max(1, (terminal_input(s) - terminal_top() - 2) / ROW); }
 
 static void draw_buffer(State *s, const char *buf, size_t length, size_t cursor, int y, int rows,
                         int first, uint32_t color)
@@ -268,22 +310,16 @@ static void draw_note(State *s)
     text(s->d, margin(s) + 10, bottom(s) - 22, status, FACE_REGULAR, c.accent, s->d->w - margin(s));
 }
 
+static Rect terminal_area(const State *s)
+{
+    return rect(margin(s), TOP + 9, rel_width(s), bottom(s) - TOP - 17);
+}
+
 static void draw_terminal(State *s)
 {
-    Colors c = colors(s);
-    int x = margin(s), width = rel_width(s), input = terminal_input(s);
-    round_box(s->d, rect(x, TOP + 5, width, input - TOP - 8), 14, c.dim);
-    int first = max(0, line_count(s->term.output, s->term.output_len, text_cols(s)) -
-                       terminal_rows(s) - s->scroll);
-    draw_buffer(s, s->term.output, s->term.output_len, SIZE_MAX, terminal_top(),
-                terminal_rows(s), first, c.ink);
-    round_box(s->d, rect(x, input, width, 40), 10, c.card);
-    text(s->d, x + 10, input + 10, "$", FACE_MONO, c.accent, x + 30);
-    int cols = max(1, (width - 36) / 9);
-    size_t skip = s->term.cursor >= (size_t)cols ? s->term.cursor - cols + 1 : 0;
-    text(s->d, x + 27, input + 10, s->term.line + skip, FACE_MONO, c.ink, x + width - 6);
-    if (!s->term.pid)
-        box(s->d, rect(x + 27 + (int)(s->term.cursor - skip) * 9, input + 11, 2, 17), c.accent);
+    Rect r = terminal_area(s);
+    round_box(s->d, r, 15, s->light ? 0xffffff : 0x1a1e2f);
+    terminal_draw(s, r, s->scroll);
 }
 
 static const char calc_keys[] = "789/456*123-0.()+<C=";
@@ -333,31 +369,145 @@ static void draw_clock(State *s)
 
 static Rect setting_button(const State *s, int index)
 {
-    return rect(margin(s), (index ? min(TOP + 177, bottom(s) - 47) : TOP + 14), min(rel_width(s), 290), 44);
+    int w = min(rel_width(s), 620), x = (s->d->w - w) / 2;
+    int y = TOP + 12 - s->scroll;
+    if (index > 0) y += 62;
+    if (index > 1) y += 54;
+    if (index > 2) y += 54;
+    return rect(x, y, w, 47);
 }
 
 static void draw_settings(State *s)
 {
     Colors c = colors(s);
-    int x = margin(s), right = s->d->w - x;
     button(s, setting_button(s, 0), s->light ? "Use dark appearance" : "Use light appearance", false);
+    button(s, setting_button(s, 1), "Network", false);
+    int end_index = getenv("KOS_APPLIANCE") ? 3 : 2;
+    if (getenv("KOS_APPLIANCE")) button(s, setting_button(s, 2), "Sign out", false);
+    button(s, setting_button(s, end_index), s->confirm_power ? "Confirm" :
+           getenv("KOS_APPLIANCE") ? "Shut down" : "End session", s->confirm_power);
     struct utsname platform;
-    char description[110];
+    char description[160];
+    int w = min(rel_width(s), 620), x = (s->d->w - w) / 2;
+    int y = setting_button(s, end_index).y + 62;
     if (uname(&platform) == 0) {
-        snprintf(description, sizeof(description), "%.28s %.52s", platform.machine, platform.release);
-        text(s->d, x, TOP + 73, description, FACE_REGULAR, c.ink, right);
+        snprintf(description, sizeof(description), "%.26s  /  %d x %d", platform.machine,
+                 s->d->device_w, s->d->device_h);
+        text(s->d, x, y, description, FACE_REGULAR, c.muted, x + w);
     }
-    snprintf(description, sizeof(description), "Display  %d x %d", s->d->device_w, s->d->device_h);
-    text(s->d, x, TOP + 97, description, FACE_REGULAR, c.muted, right);
-    snprintf(description, sizeof(description), "Storage  %s", access(s->data, W_OK) != 0 ? "Unavailable" :
-             getenv("KOS_VOLATILE") ? "Temporary (RAM)" : "Writable");
-    text(s->d, x, TOP + 121, description, FACE_REGULAR, c.muted, right);
-    const char *power = getenv("KOS_APPLIANCE") ? "Shut down" : "End session";
-    button(s, setting_button(s, 1), s->confirm_power ? "Tap again to confirm" : power, s->confirm_power);
+    snprintf(description, sizeof(description), "Signed in as %.32s%s", s->user,
+             getenv("KOS_VOLATILE") ? "  /  Temporary storage" : "");
+    text(s->d, x, y + 24, description, FACE_REGULAR, c.muted, x + w);
+}
+
+static int auth_x(const State *s) { return (s->d->w - min(rel_width(s), 440)) / 2; }
+static int auth_width(const State *s) { return s->d->w - auth_x(s) * 2; }
+static bool auth_compact(const State *s) { return s->d->h < 505 && s->keyboard; }
+static int auth_fields(const State *s) { return s->login.add ? 4 : s->login.setup ? 3 : 2; }
+
+static int auth_top(const State *s)
+{
+    int needed = 120 + auth_fields(s) * 51;
+    return TOP + max(0, (bottom(s) - TOP - needed) / 3);
+}
+
+static Rect auth_field(const State *s, int idx)
+{
+    int x = auth_x(s), w = auth_width(s);
+    bool small = auth_compact(s);
+    return small ? rect(x + (idx % 2) * (w / 2 + 3), TOP + 7 + (idx / 2) * 44, w / 2 - 4, 40) :
+        rect(x, auth_top(s) + 78 + idx * 51, w, 46);
+}
+
+static Rect auth_toggle(const State *s)
+{
+    return rect(auth_x(s), s->d->h - NAV + 7, min(115, auth_width(s) / 2 - 4), 44);
+}
+
+static Rect auth_action(const State *s)
+{
+    int w = min(178, auth_width(s) / 2);
+    return rect(auth_x(s) + auth_width(s) - w, s->d->h - NAV + 7, w, 44);
+}
+
+static void masked(char *dest, size_t cap, const char *value)
+{
+    size_t count = strlen(value);
+    if (count >= cap) count = cap - 1;
+    memset(dest, '*', count);
+    dest[count] = 0;
+}
+
+static void draw_auth(State *s)
+{
+    Colors c = colors(s);
+    const Login *l = &s->login;
+    bool small = auth_compact(s);
+    int x = auth_x(s), w = auth_width(s);
+    if (!small) {
+        const char *title = l->setup ? "Create your account" : l->add ? "Add an account" : "Welcome back";
+        text(s->d, x, auth_top(s) + 13, title, FACE_STRONG, c.ink, x + w);
+        const char *detail = l->setup ? "Choose the owner login for this device." :
+                             l->add ? "The device owner authorizes new accounts." : "Sign in to open your workspace.";
+        text(s->d, x, auth_top(s) + 42, detail, FACE_REGULAR, c.muted, x + w);
+    }
+    const char *fields[] = {l->user, l->password, l->confirmation, l->owner_password};
+    const char *labels[] = {"Username", "Password", "Confirm password", "Owner password"};
+    for (int i = 0; i < auth_fields(s); i++) {
+        Rect r = auth_field(s, i);
+        round_box(s->d, r, 11, i == l->field ? c.accent : c.edge);
+        round_box(s->d, rect(r.x + 1, r.y + 1, r.w - 2, r.h - 2), 10, c.card);
+        char stars[98];
+        masked(stars, sizeof(stars), fields[i]);
+        const char *value = (l->show || i == 0) ? fields[i] : stars;
+        const char *visible = *value ? value : labels[i];
+        if (*value) {
+            int limit = max(8, (r.w - 24) / 9);
+            int len = (int)strlen(visible);
+            if (len > limit) visible += len - limit;
+        }
+        text(s->d, r.x + 11, r.y + (small ? 10 : 13), visible, FACE_REGULAR,
+             *value ? c.ink : c.muted, r.x + r.w - 10);
+    }
+    int status_y = min(bottom(s) - 21, auth_field(s, auth_fields(s) - 1).y + 49);
+    if (*s->message && status_y > TOP) text(s->d, x, status_y, s->message, FACE_REGULAR, c.accent, x + w);
+    else if ((l->setup || l->add) && status_y > TOP)
+        text(s->d, x, status_y, "Use at least 8 characters for your password.", FACE_REGULAR, c.muted, x + w);
+}
+
+static Rect network_row(const State *s, int index)
+{
+    return rect(margin(s), TOP + 80 + index * 49 - s->scroll, rel_width(s), 45);
+}
+
+static void draw_network(State *s)
+{
+    Colors c = colors(s);
+    int x = margin(s), w = rel_width(s);
+    text(s->d, x, TOP + 16, s->network_status, FACE_STRONG, c.ink, x + w);
+    if (s->wifi_edit) {
+        text(s->d, x, TOP + 47, s->wifi_ssid, FACE_REGULAR, c.muted, x + w);
+        char password[65];
+        masked(password, sizeof(password), s->wifi_password);
+        Rect r = network_row(s, 0);
+        round_box(s->d, r, 10, c.card);
+        text(s->d, r.x + 13, r.y + 12, *password ? password : "Wi-Fi password", FACE_REGULAR, c.ink, x + w - 6);
+    } else {
+        for (int i = 0; i < s->wifi_count; i++) {
+            Rect r = network_row(s, i);
+            if (r.y < TOP + 70 || r.y + r.h > bottom(s) - 23) continue;
+            round_box(s->d, r, 10, c.card);
+            text(s->d, r.x + 13, r.y + 12, s->wifi_results[i], FACE_REGULAR, c.ink, x + w - 75);
+            const char *mode = s->wifi_secured[i] ? "Secured" : "Open";
+            text(s->d, r.x + r.w - 68, r.y + 12, mode, FACE_REGULAR, c.muted, x + w - 6);
+        }
+    }
+    if (*s->message) text(s->d, x, min(TOP + 50, bottom(s) - 20),
+                          s->message, FACE_REGULAR, c.muted, x + w);
 }
 
 typedef struct { Rect box; int key; const char *label; } SoftKey;
-enum { SHIFT_UI = 400, SYMBOL_UI, HIDE_UI };
+enum { SHIFT_UI = 400, SYMBOL_UI, HIDE_UI, CTRL_UI };
 
 static int keyboard_layout(const State *s, SoftKey keys[52])
 {
@@ -384,7 +534,9 @@ static int keyboard_layout(const State *s, SoftKey keys[52])
         int left = 5 + (w - 10) * part / 100;
         part += parts[i];
         int right = 5 + (w - 10) * part / 100;
-        keys[n++] = (SoftKey){rect(left, y + 4 * h, right - left - 3, h - 3), key[i], labels[i]};
+        bool control = key[i] == HIDE_UI && s->app == TERMINAL;
+        keys[n++] = (SoftKey){rect(left, y + 4 * h, right - left - 3, h - 3),
+                               control ? CTRL_UI : key[i], control ? "Ctrl" : labels[i]};
     }
     return n;
 }
@@ -402,15 +554,16 @@ static void draw_chrome(State *s)
     int x = margin(s);
     box(d, rect(0, 0, d->w, TOP), c.nav);
     box(d, rect(0, TOP - 1, d->w, 1), c.edge);
-    if (s->app == HOME) {
-        round_box(d, rect(x, 12, 31, 31), 9, c.accent);
+    if (s->app == HOME || s->app == AUTH) {
+        round_box(d, rect(x, 11, 32, 32), 11, c.accent);
         stroke(d, x + 10, 20, x + 10, 33, c.on_accent);
         stroke(d, x + 10, 28, x + 21, 19, c.on_accent);
         stroke(d, x + 12, 27, x + 21, 34, c.on_accent);
-        text(d, x + 40, 15, "Home", FACE_STRONG, c.ink, d->w - x);
+        text(d, x + 42, 15, "KreativeOS", FACE_STRONG, c.ink, d->w - x);
     } else {
         text(d, x, 15, app_name(s->app), FACE_STRONG, c.ink, d->w - x);
     }
+    if (s->app == HOME) button(s, top_button(s, 0), s->arranging ? "Done" : "Arrange", s->arranging);
     if (s->app == NOTES) {
         if (s->note.open) {
             button(s, top_button(s, 1), "Notes list", false);
@@ -419,11 +572,15 @@ static void draw_chrome(State *s)
     }
     if (s->app == FILES) button(s, top_button(s, 0), "Refresh", false);
     if (s->app == TERMINAL) {
-        if (s->term.pid) button(s, top_button(s, 1), "Stop", false);
+        button(s, top_button(s, 1), s->term.fd >= 0 ? "Ctrl+C" : "New", false);
         button(s, top_button(s, 0), s->keyboard ? "Hide keys" : "Keyboard", true);
     }
+    if (s->app == NETWORK)
+        button(s, top_button(s, 0), s->wifi_edit ? "Connect" : "Scan", true);
+    if (s->app == AUTH && !s->login.setup)
+        button(s, top_button(s, 0), s->login.add ? "Cancel" : "Add user", false);
     if (s->keyboard) {
-        box(d, rect(0, bottom(s), d->w, d->h - NAV - bottom(s)), c.nav);
+        box(d, rect(0, bottom(s), d->w, d->h - NAV - bottom(s)), c.dim);
         SoftKey keys[52];
         int count = keyboard_layout(s, keys);
         for (int i = 0; i < count; i++) {
@@ -431,16 +588,28 @@ static void draw_chrome(State *s)
             char label[] = { (char)key.key, 0 };
             button(s, key.box, key.label ? key.label : label,
                    key.key == '\n' || (key.key == SHIFT_UI && s->shift) ||
-                   (key.key == SYMBOL_UI && s->symbols));
+                   (key.key == SYMBOL_UI && s->symbols) || (key.key == CTRL_UI && s->control));
         }
     }
     box(d, rect(0, d->h - NAV, d->w, NAV), c.nav);
     box(d, rect(0, d->h - NAV, d->w, 1), c.edge);
-    button(s, nav_button(s, 0), "Home", s->app == HOME);
-    button(s, nav_button(s, 1), "Notes", s->app == NOTES);
-    button(s, nav_button(s, 2), "Terminal", s->app == TERMINAL);
+    if (s->app == AUTH) {
+        if (s->login.field > 0)
+            button(s, auth_toggle(s), s->login.show ? "Hide password" : "Show password", false);
+        button(s, auth_action(s), (s->login.setup || s->login.add) ? "Create account" : "Sign in", true);
+    } else {
+        for (int i = 0; i < 3; i++) {
+            Rect r = nav_button(s, i);
+            if (i == 0) {
+                centered(d, r, "Home", FACE_REGULAR, c.ink);
+            } else {
+                int index = s->order[i - 1];
+                icon(d, r.x + (r.w - 43) / 2, r.y, apps[index].app, apps[index].tint);
+            }
+        }
+    }
     if (s->show_pointer) {
-        circle(d, s->mx, s->my, 5, c.nav);
+        circle(d, s->mx, s->my, 5, c.ink);
         circle(d, s->mx, s->my, 3, c.accent);
     }
 }
@@ -456,6 +625,8 @@ void ui_draw(State *s)
     case CALCULATOR: draw_calculator(s); break;
     case CLOCK: draw_clock(s); break;
     case SETTINGS: draw_settings(s); break;
+    case NETWORK: draw_network(s); break;
+    case AUTH: draw_auth(s); break;
     }
     draw_chrome(s);
 }
@@ -469,22 +640,38 @@ static unsigned milliseconds(void)
 
 static void go(State *s, App app)
 {
-    if (s->app == app) return;
+    if (s->app == app) { s->drawer = s->tasks = false; return; }
     if (s->app == NOTES && !notes_save(s)) return;
     s->app = app;
+    s->drawer = s->tasks = false;
+    if (app != HOME && app != AUTH) {
+        int found = -1;
+        for (int i = 0; i < s->recent_count; i++) if (s->recent[i] == app) found = i;
+        if (found >= 0) {
+            for (int i = found; i > 0; i--) s->recent[i] = s->recent[i - 1];
+        } else {
+            if (s->recent_count < APP_COUNT) s->recent_count++;
+            for (int i = s->recent_count - 1; i > 0; i--) s->recent[i] = s->recent[i - 1];
+        }
+        s->recent[0] = app;
+    }
     s->scroll = 0;
-    s->keyboard = s->shift = s->symbols = s->confirm_power = false;
+    s->keyboard = s->shift = s->symbols = s->control = s->confirm_power = false;
     s->message[0] = 0;
+    s->arranging = false;
+    s->selection = -1;
+    s->wifi_edit = false;
+    explicit_bzero(s->wifi_password, sizeof(s->wifi_password));
+    if (app == NETWORK) network_status(s);
     s->list_dirty = true;
 }
 
 static int scroll_limit(State *s)
 {
     switch (s->app) {
-    case HOME: {
-        Rect tail = app_card(s, (int)ARRAY_LEN(apps) - 1);
-        return max(0, tail.y + tail.h + s->scroll + 12 - bottom(s));
-    }
+    case HOME: return 0;
+    case NETWORK: return s->wifi_edit ? 0 : max(0, (s->wifi_count - 1) * 49);
+    case SETTINGS: return max(0, TOP + 320 - bottom(s));
     case NOTES:
         if (s->note.open)
             return max(0, line_count(s->note.text, s->note.length, text_cols(s)) - note_rows(s));
@@ -492,7 +679,7 @@ static int scroll_limit(State *s)
     case FILES:
         return max(0, TOP + 8 + s->name_count * 55 - bottom(s));
     case TERMINAL:
-        return max(0, line_count(s->term.output, s->term.output_len, text_cols(s)) - terminal_rows(s));
+        return terminal_history(s);
     default: return 0;
     }
 }
@@ -604,21 +791,42 @@ static void calc_key(State *s, int key)
     }
 }
 
+static void wifi_key(State *s, int key)
+{
+    if (!s->wifi_edit) return;
+    size_t length = strlen(s->wifi_password);
+    if (key == '\n') network_connect(s);
+    else if (key == '\b' && length) s->wifi_password[length - 1] = 0;
+    else if (key >= 32 && key <= 126 && length < 63) {
+        s->wifi_password[length] = (char)key;
+        s->wifi_password[length + 1] = 0;
+    }
+}
+
 void ui_key(State *s, int key)
 {
     if (key == NO_KEY) return;
-    if (key == KEY_HOME_UI) go(s, HOME);
-    else if (key == KEY_SAVE_UI) notes_save(s);
-    else {
-        switch (s->app) {
-        case NOTES: note_key(s, key); break;
-        case TERMINAL: terminal_key(s, key); break;
-        case CALCULATOR: calc_key(s, key); break;
-        case HOME: case FILES:
-            if (key == KEY_UP_UI || key == KEY_DOWN_UI) ui_scroll(s, key == KEY_UP_UI ? -65 : 65);
-            break;
-        default: break;
-        }
+    if (s->app == AUTH) {
+        if (key == KEY_ESCAPE_UI) { s->keyboard = false; s->login.show = false; }
+        else account_key(s, key);
+    } else if (s->app == TERMINAL) {
+        terminal_key(s, key);
+    } else if (key == KEY_HOME_UI || key == KEY_ESCAPE_UI) {
+        go(s, HOME);
+    } else if (key == KEY_SAVE_UI) {
+        notes_save(s);
+    } else switch (s->app) {
+    case NOTES: note_key(s, key); break;
+    case NETWORK: wifi_key(s, key); break;
+    case CALCULATOR: calc_key(s, key); break;
+    case HOME:
+        if (key == KEY_LEFT_UI) s->page = max(0, s->page - 1);
+        if (key == KEY_RIGHT_UI) s->page = min(PAGE_COUNT - 1, s->page + 1);
+        break;
+    case FILES: case SETTINGS:
+        if (key == KEY_UP_UI || key == KEY_DOWN_UI) ui_scroll(s, key == KEY_UP_UI ? -65 : 65);
+        break;
+    default: break;
     }
     s->redraw = true;
 }
@@ -649,11 +857,31 @@ static void change_appearance(State *s)
     } else close(fd);
 }
 
+static void save_layout(const State *s)
+{
+    if (!*s->data) return;
+    char scratch[PATH_MAX], final[PATH_MAX];
+    if (snprintf(scratch, sizeof(scratch), "%s/.layout-XXXXXX", s->data) >= (int)sizeof(scratch) ||
+        snprintf(final, sizeof(final), "%s/.layout", s->data) >= (int)sizeof(final)) return;
+    int fd = mkostemp(scratch, O_CLOEXEC);
+    if (fd < 0) return;
+    bool good = true;
+    for (int i = 0; i < APP_COUNT; i++)
+        if (dprintf(fd, "%d\n", s->order[i]) < 0) good = false;
+    if (fsync(fd)) good = false;
+    if (close(fd)) good = false;
+    if (!good || rename(scratch, final)) unlink(scratch);
+}
+
 static void click(State *s)
 {
-    for (int i = 0; i < 3; i++) {
-        static const App nav[] = { HOME, NOTES, TERMINAL };
-        if (hit(s, nav_button(s, i))) { go(s, nav[i]); return; }
+    if (s->app == AUTH) {
+        if (hit(s, auth_toggle(s)) && s->login.field > 0) { s->login.show = !s->login.show; return; }
+        if (hit(s, auth_action(s))) { account_submit(s); return; }
+    } else {
+        for (int i = 0; i < 3; i++) {
+            if (hit(s, nav_button(s, i))) { go(s, i == 0 ? HOME : apps[s->order[i - 1]].app); return; }
+        }
     }
     if (s->keyboard && s->my >= bottom(s)) {
         SoftKey keys[52];
@@ -663,19 +891,33 @@ static void click(State *s)
             int key = keys[i].key;
             if (key == SHIFT_UI) s->shift = !s->shift;
             else if (key == SYMBOL_UI) s->symbols = !s->symbols;
+            else if (key == CTRL_UI) s->control = !s->control;
             else if (key == HIDE_UI) {
                 s->keyboard = false;
                 s->scroll = min(s->scroll, scroll_limit(s));
             } else {
+                int lower = key >= 'A' && key <= 'Z' ? key - 'A' + 'a' : key;
+                if (s->control && lower >= 'a' && lower <= 'z') key = KEY_CONTROL_UI + lower - 'a';
                 ui_key(s, key);
-                s->shift = false;
+                s->shift = s->control = false;
             }
             return;
         }
         return;
     }
     if (s->my < TOP) {
-        if (s->app == NOTES) {
+        if (s->app == HOME && hit(s, top_button(s, 0))) {
+            s->arranging = !s->arranging;
+            s->selection = -1;
+        } else if (s->app == AUTH && !s->login.setup && hit(s, top_button(s, 0))) {
+            bool add = !s->login.add;
+            explicit_bzero(&s->login, sizeof(s->login));
+            s->login.add = add;
+            s->message[0] = 0;
+        } else if (s->app == NETWORK && hit(s, top_button(s, 0))) {
+            if (s->wifi_edit) network_connect(s);
+            else network_scan(s);
+        } else if (s->app == NOTES) {
             if (hit(s, top_button(s, 0))) {
                 if (!s->note.open) notes_new(s);
                 else if (s->note.editing_name) begin_note(s);
@@ -693,17 +935,68 @@ static void click(State *s)
         } else if (s->app == TERMINAL) {
             if (hit(s, top_button(s, 0))) {
                 s->keyboard = !s->keyboard;
+                s->control = false;
                 s->scroll = 0;
             }
-            if (s->term.pid && hit(s, top_button(s, 1))) terminal_key(s, KEY_BREAK_UI);
+            if (hit(s, top_button(s, 1))) {
+                if (s->term.fd >= 0) terminal_key(s, KEY_BREAK_UI);
+                else terminal_close(&s->term);
+            }
         }
         return;
     }
     if (s->my >= bottom(s)) return;
     switch (s->app) {
     case HOME:
-        for (size_t i = 0; i < ARRAY_LEN(apps); i++)
-            if (hit(s, app_card(s, (int)i))) { go(s, apps[i].app); break; }
+        if (s->drawer || s->tasks) {
+            int cols = columns(s), step = (s->d->w - 42) / cols;
+            int count = s->tasks ? s->recent_count : APP_COUNT;
+            for (int i = 0; i < count; i++) {
+                Rect tile = rect(21 + i % cols * step, TOP + 57 + i / cols * 96, step - 5, 91);
+                if (hit(s, tile)) { go(s, s->tasks ? s->recent[i] : apps[s->order[i]].app); return; }
+            }
+            return;
+        }
+        for (int p = 0; p < PAGE_COUNT; p++)
+            if (hit(s, page_dot(s, p))) { s->page = p; return; }
+        for (int i = 0; i < APP_COUNT; i++) {
+            if (!hit(s, app_card(s, i))) continue;
+            if (!s->arranging) go(s, apps[s->order[i]].app);
+            else if (s->selection == i) s->selection = -1;
+            else if (s->selection < 0) s->selection = i;
+            else {
+                int other = s->order[s->selection];
+                s->order[s->selection] = s->order[i];
+                s->order[i] = other;
+                s->selection = -1;
+                save_layout(s);
+            }
+            break;
+        }
+        break;
+    case AUTH:
+        for (int i = 0; i < auth_fields(s); i++)
+            if (hit(s, auth_field(s, i))) {
+                s->login.field = i;
+                s->keyboard = true;
+                s->login.show = false;
+                break;
+            }
+        break;
+    case NETWORK:
+        if (s->wifi_edit) { s->keyboard = true; break; }
+        if (s->my < TOP + 70 || s->my >= bottom(s) - 23) break;
+        for (int i = 0; i < s->wifi_count; i++)
+            if (hit(s, network_row(s, i))) {
+                strcpy(s->wifi_ssid, s->wifi_results[i]);
+                s->wifi_open = !s->wifi_secured[i];
+                s->wifi_edit = true;
+                s->scroll = 0;
+                s->keyboard = !s->wifi_open;
+                s->message[0] = 0;
+                if (s->wifi_open) network_connect(s);
+                break;
+            }
         break;
     case NOTES:
         if (s->note.open) {
@@ -730,7 +1023,7 @@ static void click(State *s)
             if (hit(s, note_card(s, i))) { notes_open(s, s->names[i]); break; }
         break;
     case TERMINAL:
-        if (s->my >= terminal_input(s)) { s->keyboard = true; s->scroll = 0; }
+        if (hit(s, terminal_area(s))) { s->keyboard = true; s->scroll = 0; }
         break;
     case CALCULATOR:
         for (size_t i = 0; i < sizeof(calc_keys) - 1; i++)
@@ -748,8 +1041,12 @@ static void click(State *s)
         break;
     case SETTINGS:
         if (hit(s, setting_button(s, 0))) change_appearance(s);
-        else if (hit(s, setting_button(s, 1)) && notes_save(s)) {
-            if (s->confirm_power) s->running = false;
+        else if (hit(s, setting_button(s, 1))) go(s, NETWORK);
+        else if (getenv("KOS_APPLIANCE") && hit(s, setting_button(s, 2)) && notes_save(s)) {
+            s->exit_code = 43;
+            s->running = false;
+        } else if (hit(s, setting_button(s, getenv("KOS_APPLIANCE") ? 3 : 2)) && notes_save(s)) {
+            if (s->confirm_power) { s->running = false; s->exit_code = 42; }
             s->confirm_power = true;
         } else s->confirm_power = false;
         break;
@@ -775,15 +1072,53 @@ void ui_pointer(State *s, int x, int y, bool down, bool show)
         s->start_x = s->mx;
         s->start_y = s->my;
         s->start_scroll = s->scroll;
-        s->dragged = false;
+        s->page_start = s->page_position;
+        s->press_at = s->now;
+        s->dragged = s->swipe_horizontal = false;
     }
     if (s->pointer) {
         int dx = s->mx - s->start_x, dy = s->my - s->start_y;
-        if (abs(dx) > 7 || abs(dy) > 7) s->dragged = true;
-        if (s->dragged && s->start_y >= TOP && s->start_y < bottom(s)) {
+        if (!s->dragged && (abs(dx) > 8 || abs(dy) > 8)) {
+            s->dragged = true;
+            s->swipe_horizontal = s->app == HOME && abs(dx) > abs(dy);
+        }
+        bool content = s->start_y >= TOP && s->start_y < bottom(s);
+        if (!down && s->dragged && dy < -45 && abs(dy) > abs(dx)) {
+            if (s->app == HOME) { s->drawer = true; s->tasks = false; }
+            else if (s->start_y >= s->d->h - NAV - 45) {
+                if (s->app == NOTES && !notes_save(s)) return;
+                s->app = HOME; s->tasks = true; s->drawer = false; s->keyboard = false;
+            }
+            s->pointer = false; s->redraw = true; return;
+        }
+        if (!down && s->dragged && dy > 45 && s->app == HOME && (s->drawer || s->tasks)) {
+            s->drawer = s->tasks = false; s->pointer = false; s->redraw = true; return;
+        }
+        if (s->dragged && content && s->swipe_horizontal) {
+            double distance = (double)dx / s->d->w;
+            double target = s->page_start - distance;
+            if (target < 0) target /= 4;
+            if (target > PAGE_COUNT - 1) target = PAGE_COUNT - 1 + (target - PAGE_COUNT + 1) / 4;
+            s->page_position = target;
+            if (!down) {
+                int threshold = (s->now - s->press_at < 320) ? 36 : s->d->w / 5;
+                int page = (int)lround(s->page_start);
+                if (abs(dx) > threshold) page += dx < 0 ? 1 : -1;
+                s->page = max(0, min(PAGE_COUNT - 1, page));
+            }
+        } else if (s->dragged && content && s->app != HOME && s->app != AUTH) {
             s->scroll = s->start_scroll;
             ui_scroll(s, -dy);
         } else if (!down && !s->dragged) {
+            if (s->app == HOME && !s->arranging && content && s->now - s->press_at > 500) {
+                for (int i = 0; i < APP_COUNT; i++) if (hit(s, app_card(s, i))) {
+                    s->arranging = true;
+                    s->selection = i;
+                    s->pointer = false;
+                    s->redraw = true;
+                    return;
+                }
+            }
             click(s);
         }
     }
@@ -799,12 +1134,13 @@ void ui_init(State *s, Display *d, const char *data)
     s->mx = d->w / 2;
     s->my = d->h / 2;
     s->term.fd = -1;
-    static const char welcome[] = "KreativeOS Terminal\nTry uname -m, ls, or date.\n";
-    memcpy(s->term.output, welcome, sizeof(welcome));
-    s->term.output_len = sizeof(welcome) - 1;
+    s->light = true;
+    s->selection = -1;
+    for (int i = 0; i < APP_COUNT; i++) s->order[i] = i;
+    const char *user = getenv("USER");
+    snprintf(s->user, sizeof(s->user), "%.32s", user && *user ? user : "local");
     if (data && strlen(data) < sizeof(s->data) - 14) {
         strcpy(s->data, data);
-        strcpy(s->term.cwd, data);
         char path[PATH_MAX];
         size_t len = strlen(data);
         memcpy(path, data, len);
@@ -814,11 +1150,23 @@ void ui_init(State *s, Display *d, const char *data)
         FILE *file = fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) ? fdopen(fd, "r") : NULL;
         if (file) {
             char choice[8];
-            s->light = fgets(choice, sizeof(choice), file) && !strcmp(choice, "light\n");
+            if (fgets(choice, sizeof(choice), file)) s->light = strcmp(choice, "dark\n") != 0;
+            fclose(file);
+        } else if (fd >= 0) close(fd);
+        memcpy(path + len, "/.layout", sizeof("/.layout"));
+        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+        file = fd >= 0 && fstat(fd, &st) == 0 && S_ISREG(st.st_mode) ? fdopen(fd, "r") : NULL;
+        if (file) {
+            int layout[APP_COUNT], mask = 0;
+            for (int i = 0; i < APP_COUNT; i++) {
+                if (fscanf(file, "%d", &layout[i]) != 1 || layout[i] < 0 ||
+                    layout[i] >= APP_COUNT || (mask & (1 << layout[i]))) break;
+                mask |= 1 << layout[i];
+            }
+            if (mask == (1 << APP_COUNT) - 1) memcpy(s->order, layout, sizeof(layout));
             fclose(file);
         } else if (fd >= 0) close(fd);
     }
-    if (!*s->term.cwd) strcpy(s->term.cwd, "/");
 }
 
 void ui_tick(State *s)
@@ -827,6 +1175,17 @@ void ui_tick(State *s)
     s->now = now;
     if (s->app == CLOCK && before / 100 != now / 100) s->redraw = true;
     if (s->app == HOME && before / 1000 != now / 1000) s->redraw = true;
+    if (s->app == HOME && !(s->pointer && s->swipe_horizontal) && s->page_position != s->page) {
+        double delta = s->page - s->page_position;
+        if (fabs(delta) < .003) s->page_position = s->page;
+        else s->page_position += delta * min((int)(now - before), 28) / 90.;
+        s->redraw = true;
+    }
+    if (s->app == NETWORK) {
+        if (before / 1000 != now / 1000 && network_status(s)) s->redraw = true;
+        network_refresh(s);
+        network_join_update(s);
+    }
     if (s->note.dirty && (int)(now - s->note.next_save) >= 0) {
         notes_save(s);
         s->note.next_save = now + 2500;
@@ -858,13 +1217,21 @@ int ui_test(void)
     const char *failure = "calculator";
     if (!(calculate("-(2+3)*4.5/2", &number) && number == -11.25 &&
         !calculate("1/0", &number) && !calculate("2+)", &number))) goto fail;
-    failure = "home swipe and Settings tile";
-    ui_pointer(&s, 160, 492, true, false);
-    ui_pointer(&s, 160, 142, true, false);
-    ui_pointer(&s, 160, 142, false, false);
-    if (s.scroll <= 0 || s.app != HOME) goto fail;
-    tap(&s, app_card(&s, 5));
-    if (s.app != SETTINGS) goto fail;
+    failure = "horizontal swipe and persistent home arrangement";
+    ui_pointer(&s, 290, 350, true, false);
+    ui_pointer(&s, 55, 350, true, false);
+    ui_pointer(&s, 55, 350, false, false);
+    if (s.page != 1 || s.page_position < .5 || s.app != HOME) goto fail;
+    s.page = 0;
+    s.page_position = 0;
+    tap(&s, top_button(&s, 0));
+    tap(&s, app_card(&s, 2));
+    tap(&s, app_card(&s, 3));
+    if (s.order[2] != 3 || s.order[3] != 2) goto fail;
+    static State loaded;
+    ui_init(&loaded, &d, test_dir);
+    if (loaded.order[2] != 3 || loaded.order[3] != 2) goto fail;
+    tap(&s, top_button(&s, 0));
     failure = "touch keyboard and note persistence";
     tap(&s, nav_button(&s, 1));
     tap(&s, top_button(&s, 0));
@@ -880,20 +1247,30 @@ int ui_test(void)
     ui_draw(&s);
     tap(&s, note_card(&s, 0));
     if (!s.note.open || strcmp(s.note.text, "KreativeOS\nWrite!") != 0) goto fail;
-    failure = "terminal pipeline and history";
+    failure = "interactive PTY, pipeline and foreground stdin";
     tap(&s, nav_button(&s, 2));
-    type(&s, "printf 'shell works\\n' | cat\n");
-    for (int i = 0; i < 100 && s.term.pid; i++) { usleep(10000); ui_tick(&s); }
-    if (s.term.pid || !strstr(s.term.output, "\nshell works\n")) goto fail;
-    ui_key(&s, KEY_UP_UI);
-    if (strcmp(s.term.line, "printf 'shell works\\n' | cat")) goto fail;
-    ui_key(&s, KEY_DOWN_UI);
-    if (*s.term.line) goto fail;
+    ui_draw(&s);
+    type(&s, "test -t 0 && test -t 1 && printf '\\163hell works\\n' | cat\n");
+    for (int i = 0; i < 150 && !terminal_contains(&s.term, "shell works"); i++) {
+        usleep(10000);
+        ui_tick(&s);
+    }
+    if (!terminal_contains(&s.term, "shell works")) goto fail;
+    type(&s, "read -r word; printf 'reply=%s\\n' \"$word\"\n");
+    usleep(45000);
+    type(&s, "hiya\n");
+    for (int i = 0; i < 150 && !terminal_contains(&s.term, "reply=hiya"); i++) {
+        usleep(10000);
+        ui_tick(&s);
+    }
+    if (!terminal_contains(&s.term, "reply=hiya")) goto fail;
     failure = NULL;
 fail:
-    if (s.term.pid > 0) kill(-s.term.pid, 9);
+    terminal_close(&s.term);
     char file[256];
     snprintf(file, sizeof(file), "%s/note.txt", test_dir);
+    unlink(file);
+    snprintf(file, sizeof(file), "%s/.layout", test_dir);
     unlink(file);
     rmdir(test_dir);
     display_close(&d);

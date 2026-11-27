@@ -1,6 +1,8 @@
 #include "kos.h"
+#include <plutovg.h>
 
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +12,7 @@
 
 struct Font { const unsigned char *pixels, *advance; int w, h; };
 #include "font.h"
+#include "wallpaper.h"
 
 static const struct Font *get_font(Face face)
 {
@@ -29,7 +32,16 @@ static bool allocate(Display *d)
     d->h = height / d->scale;
     if (d->w < 280 || d->h < 300 || width > 8192 || height > 8192) return false;
     d->pixels = calloc((size_t)d->w * d->h, sizeof(*d->pixels));
-    return d->pixels != NULL;
+    if (!d->pixels) return false;
+    plutovg_surface_t *surface = plutovg_surface_create_for_data((unsigned char *)d->pixels, d->w, d->h, d->w * 4);
+    if (surface) {
+        d->vector = plutovg_canvas_create(surface);
+        plutovg_surface_destroy(surface);
+    }
+    if (d->vector) return true;
+    free(d->pixels);
+    d->pixels = NULL;
+    return false;
 }
 
 bool display_memory(Display *d, int width, int height)
@@ -80,6 +92,7 @@ void display_close(Display *d)
 {
     if (d->mapped) munmap(d->mapped, d->mapped_size);
     if (d->fd >= 0) close(d->fd);
+    if (d->vector) plutovg_canvas_destroy(d->vector);
     free(d->pixels);
 }
 
@@ -158,48 +171,41 @@ void box(Display *d, Rect r, uint32_t color)
     int left = clamp(r.x, 0, d->w), right = clamp(r.x + r.w, 0, d->w);
     int top = clamp(r.y, 0, d->h), bottom = clamp(r.y + r.h, 0, d->h);
     for (int y = top; y < bottom; y++)
-        for (int x = left; x < right; x++) d->pixels[(size_t)y * d->w + x] = color;
+        for (int x = left; x < right; x++) d->pixels[(size_t)y * d->w + x]  = color | 0xff000000u;
+}
+
+static void brush(Display *d, uint32_t color)
+{
+    plutovg_canvas_set_rgb(d->vector, ((color >> 16) & 255) / 255.f,
+                           ((color >> 8) & 255) / 255.f, (color & 255) / 255.f);
 }
 
 void round_box(Display *d, Rect r, int radius, uint32_t color)
 {
-    if (radius > r.w / 2) radius = r.w / 2;
-    if (radius > r.h / 2) radius = r.h / 2;
-    if (radius <= 0) {
-        box(d, r, color);
-        return;
-    }
-    for (int y = 0; y < r.h; y++) {
-        int dy = (y < r.h / 2 ? y : r.h - y - 1);
-        int cut = 0;
-        if (dy < radius) {
-            int rise = radius - dy - 1;
-            while ((radius - cut) * (radius - cut) + rise * rise > radius * radius) cut++;
-        }
-        box(d, rect(r.x + cut, r.y + y, r.w - cut * 2, 1), color);
-    }
+    if (r.w <= 0 || r.h <= 0) return;
+    brush(d, color);
+    plutovg_canvas_new_path(d->vector);
+    plutovg_canvas_round_rect(d->vector, r.x, r.y, r.w, r.h, radius, radius);
+    plutovg_canvas_fill(d->vector);
 }
 
 void line(Display *d, int x, int y, int end_x, int end_y, uint32_t color)
 {
-    int dx = abs(end_x - x), sx = x < end_x ? 1 : -1;
-    int dy = -abs(end_y - y), sy = y < end_y ? 1 : -1;
-    int error = dx + dy;
-    for (;;) {
-        if (x >= 0 && y >= 0 && x < d->w && y < d->h)
-            d->pixels[(size_t)y * d->w + x] = color;
-        if (x == end_x && y == end_y) break;
-        int step = 2 * error;
-        if (step >= dy) { error += dy; x += sx; }
-        if (step <= dx) { error += dx; y += sy; }
-    }
+    brush(d, color);
+    plutovg_canvas_new_path(d->vector);
+    plutovg_canvas_set_line_width(d->vector, 1.5);
+    plutovg_canvas_set_line_cap(d->vector, PLUTOVG_LINE_CAP_ROUND);
+    plutovg_canvas_move_to(d->vector, x + .5, y + .5);
+    plutovg_canvas_line_to(d->vector, end_x + .5, end_y + .5);
+    plutovg_canvas_stroke(d->vector);
 }
 
 void circle(Display *d, int x, int y, int r, uint32_t color)
 {
-    for (int dy = -r; dy <= r; dy++)
-        for (int dx = -r; dx <= r; dx++)
-            if (dx * dx + dy * dy <= r * r) box(d, rect(x + dx, y + dy, 1, 1), color);
+    brush(d, color);
+    plutovg_canvas_new_path(d->vector);
+    plutovg_canvas_circle(d->vector, x, y, r);
+    plutovg_canvas_fill(d->vector);
 }
 
 void text(Display *d, int x, int y, const char *str, Face face, uint32_t color, int right)
@@ -217,7 +223,7 @@ void text(Display *d, int x, int y, const char *str, Face face, uint32_t color, 
                     if (!alpha) continue;
                     uint32_t *pixel = &d->pixels[(size_t)(y + row) * d->w + x + column];
                     if (alpha == 15) {
-                        *pixel = color;
+                        *pixel  = color | 0xff000000u;
                     } else {
                         uint32_t bg = *pixel, mixed = 0;
                         for (unsigned shift = 0; shift <= 16; shift += 8) {
@@ -225,7 +231,7 @@ void text(Display *d, int x, int y, const char *str, Face face, uint32_t color, 
                                                ((bg >> shift) & 255) * (15 - alpha);
                             mixed |= ((channel + 7) / 15) << shift;
                         }
-                        *pixel = mixed;
+                        *pixel = mixed | 0xff000000u;
                     }
                 }
         }
@@ -246,14 +252,17 @@ int text_width(const char *str, Face face)
 
 void wallpaper(Display *d, bool light)
 {
-    for (int y = 0; y < d->h; y++)
-        for (int x = 0; x < d->w; x++) {
-            int a = (d->w - x) * 65 / d->w;
-            int b = (d->h - y) * 45 / d->h;
-            int glow = a * b / 65;
-            unsigned r = light ? 231 + glow / 3 : 15 + glow;
-            unsigned g = light ? 236 + glow / 4 : 19 + glow / 2;
-            unsigned blue = light ? 245 + glow / 5 : 36 + glow * 4 / 3;
-            d->pixels[(size_t)y * d->w + x] = r << 16 | g << 8 | blue;
-        }
+    (void)light;
+    static plutovg_surface_t *picture;
+    if (!picture) picture = plutovg_surface_load_from_image_data(wallpaper_jpeg, sizeof(wallpaper_jpeg));
+    if (!picture) { box(d, rect(0, 0, d->w, d->h), 0x242c4c); return; }
+    int w = plutovg_surface_get_width(picture), h = plutovg_surface_get_height(picture);
+    int stride = plutovg_surface_get_stride(picture) / 4;
+    const uint32_t *pixels = (const uint32_t *)plutovg_surface_get_data(picture);
+    double scale = fmax((double)d->w / w, (double)d->h / h);
+    double ox = (w - d->w / scale) / 2, oy = (h - d->h / scale) / 2;
+    for (int y = 0; y < d->h; y++) for (int x = 0; x < d->w; x++) {
+        int sx = (int)(x / scale + ox), sy = (int)(y / scale + oy);
+        d->pixels[(size_t)y * d->w + x] = pixels[sy * stride + sx] | 0xff000000u;
+    }
 }

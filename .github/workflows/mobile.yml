@@ -19,8 +19,9 @@ jobs:
       - name: Install build and QEMU dependencies
         run: |
           dpkg --add-architecture arm64
+          sed -i 's/^Components: main$/Components: main non-free-firmware/' /etc/apt/sources.list.d/debian.sources
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates git make gcc             gcc-aarch64-linux-gnu libc6-dev libc6-dev-arm64-cross python3 python3-pil             fonts-dejavu-core binutils binutils-aarch64-linux-gnu dosfstools mtools             fdisk e2fsprogs zstd kmod qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
+          apt-get install -y --no-install-recommends ca-certificates git make gcc             gcc-aarch64-linux-gnu libc6-dev libc6-dev-arm64-cross python3 python3-pil             fonts-dejavu-core ncurses-base libvterm-dev libcrypt-dev binutils binutils-aarch64-linux-gnu dosfstools mtools             fdisk e2fsprogs zstd kmod qemu-system-x86 qemu-system-arm ovmf qemu-efi-aarch64
       - uses: actions/checkout@v4
       - run: make test
       - run: bash scripts/debian-build.sh ${{ matrix.architecture }}

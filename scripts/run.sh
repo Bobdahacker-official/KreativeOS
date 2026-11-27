@@ -37,7 +37,7 @@ else
     firmware=(-drive "if=pflash,unit=0,format=raw,readonly=on,file=$code"
               -drive "if=pflash,unit=1,format=raw,file=$state")
 fi
-exec "$qemu" "${machine[@]}" "${firmware[@]}" -m 768 -net none \
+exec "$qemu" "${machine[@]}" "${firmware[@]}" -m 768 -netdev "${KOS_NETDEV:-user,id=kosnet}" -device virtio-net-pci,netdev=kosnet \
     -device "virtio-gpu-pci,xres=${resolution%x*},yres=${resolution#*x}" \
     -device virtio-keyboard-pci -device virtio-tablet-pci \
     -drive "if=none,id=kos,format=raw,file=$image" -device virtio-blk-pci,drive=kos,bootindex=1 \

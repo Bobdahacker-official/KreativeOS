@@ -82,12 +82,16 @@ static int to_ui(InputDevice *d, unsigned code)
     bool shift = d->shift_left || d->shift_right;
     if (ctrl && code == KEY_S) return KEY_SAVE_UI;
     if (ctrl && code == KEY_C) return KEY_BREAK_UI;
+    if (ctrl && code >= KEY_Q && code <= KEY_P) return KEY_CONTROL_UI + "qwertyuiop"[code - KEY_Q] - 'a';
+    if (ctrl && code >= KEY_A && code <= KEY_L) return KEY_CONTROL_UI + "asdfghjkl"[code - KEY_A] - 'a';
+    if (ctrl && code >= KEY_Z && code <= KEY_M) return KEY_CONTROL_UI + "zxcvbnm"[code - KEY_Z] - 'a';
     if (code >= KEY_Q && code <= KEY_P) return (shift ? "QWERTYUIOP" : "qwertyuiop")[code - KEY_Q];
     if (code >= KEY_A && code <= KEY_L) return (shift ? "ASDFGHJKL" : "asdfghjkl")[code - KEY_A];
     if (code >= KEY_Z && code <= KEY_M) return (shift ? "ZXCVBNM" : "zxcvbnm")[code - KEY_Z];
     if (code >= KEY_1 && code <= KEY_0) return (shift ? "!@#$%^&*()" : "1234567890")[code - KEY_1];
     switch (code) {
-    case KEY_ESC: case KEY_HOME: return KEY_HOME_UI;
+    case KEY_ESC: return KEY_ESCAPE_UI;
+    case KEY_HOME: return KEY_HOME_UI;
     case KEY_UP: return KEY_UP_UI;
     case KEY_DOWN: return KEY_DOWN_UI;
     case KEY_LEFT: return KEY_LEFT_UI;
@@ -198,7 +202,7 @@ void inputs_poll(Inputs *inputs, State *s)
     fds[0] = (struct pollfd){ .fd = inputs->monitor, .events = POLLIN };
     for (int i = 0; i < inputs->count; i++)
         fds[i + 1] = (struct pollfd){ .fd = inputs->items[i].fd, .events = POLLIN };
-    if (poll(fds, inputs->count + 1, 32) <= 0) return;
+    if (poll(fds, inputs->count + 1, 16) <= 0) return;
     if (fds[0].revents & POLLIN) {
         char buffer[4096];
         while (read(inputs->monitor, buffer, sizeof(buffer)) > 0) {}

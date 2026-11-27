@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Boot the actual UEFI image and drive the graphical session through QMP."""
 import argparse
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -9,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+from threading import Thread
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,24 +56,52 @@ class Monitor:
         self.pointer(x, y, False)
 
     def write(self, string):
-        mapping = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash"}
+        mapping = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash",
+                   ":": "semicolon", ";": "semicolon", "\t": "tab", "&": "7", ">": "dot",
+                   "$": "4", "?": "slash", "=": "equal", "_": "minus", "'": "apostrophe"}
         for letter in string:
-            keys = ["shift", "dot"] if letter == ">" else [mapping.get(letter, letter)]
-            self.call("send-key", keys=[{"type": "qcode", "data": key} for key in keys], **{"hold-time": 25})
-            time.sleep(0.055)
+            code = mapping.get(letter, letter.lower())
+            keys = ["shift", code] if letter in ">&$?:_" or letter.isupper() else [code]
+            self.call("send-key", keys=[{"type": "qcode", "data": key} for key in keys], **{"hold-time": 30})
+            time.sleep(0.072)
 
 
-def wait_ready(path, process):
+def wait_stage(path, process, stage, occurrence=1):
     for _ in range(350):
         log = path.read_text(errors="replace") if path.exists() else ""
-        if match := re.search(r"KreativeOS ready \((\d+)x(\d+)\)", log):
+        matches = re.findall(rf"KreativeOS {stage} \((\d+)x(\d+)\)", log)
+        if len(matches) >= occurrence:
             if "KreativeOS: persistent storage mounted" not in log:
                 raise RuntimeError(log + "\nExpected persistent ext4")
-            return tuple(map(int, match.groups()))
+            return tuple(map(int, matches[-1]))
         if process.poll() is not None or "Kernel panic" in log:
             break
         time.sleep(0.15)
-    raise RuntimeError("Graphical boot failed\n" + log)
+    raise RuntimeError(f"Graphical {stage} failed\n" + log)
+
+
+class ProbeHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def do_GET(self):
+        body = b"kreativeos-network-ok\n"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@contextmanager
+def probe():
+    with ThreadingHTTPServer(("127.0.0.1", 0), ProbeHandler) as server:
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield server.server_address[1]
+        finally:
+            server.shutdown()
+            thread.join()
 
 
 def disk_file(image, name):
@@ -81,7 +112,7 @@ def disk_file(image, name):
 def exercise(architecture, qemu_data=None, captures=None):
     tag = {"amd64": "x86_64", "arm64": "aarch64"}[architecture]
     env = os.environ.copy()
-    with tempfile.TemporaryDirectory(prefix="kos-qemu-") as location:
+    with tempfile.TemporaryDirectory(prefix="kos-qemu-") as location, probe() as port:
         tmp = Path(location)
         image = tmp / "guest.img"
         shutil.copyfile(ROOT / "build" / architecture / f"KreativeOS-{tag}.img", image)
@@ -96,12 +127,17 @@ def exercise(architecture, qemu_data=None, captures=None):
         process = subprocess.Popen(["bash", "scripts/run.sh", architecture, *options], cwd=ROOT, env=env)
         qmp = None
         try:
-            w, h = wait_ready(serial, process)
+            w, h = wait_stage(serial, process, "greeter")
             qmp = Monitor(monitor)
             qmp.width, qmp.height = w, h
             if captures:
                 time.sleep(0.8)
                 captures.mkdir(parents=True, exist_ok=True)
+                qmp.call("screendump", filename=str((captures / f"setup-{architecture}.ppm").resolve()))
+            qmp.write("tester\nenglish8\nenglish8\n")
+            wait_stage(serial, process, "ready")
+            if captures:
+                time.sleep(0.8)
                 qmp.call("screendump", filename=str((captures / f"home-{architecture}.ppm").resolve()))
             nav = min(w - 14, 440)
             dock_x = (w - nav) // 2
@@ -113,12 +149,54 @@ def exercise(architecture, qemu_data=None, captures=None):
             if captures:
                 qmp.call("screendump", filename=str((captures / f"notes-{architecture}.ppm").resolve()))
             qmp.click(dock_x + dock_step * 5 // 2, h - 28)
+            time.sleep(0.65)
             qmp.write("uname -m > machine.txt\n")
-            time.sleep(0.35)
+            qmp.write("id -u > uid.txt\n")
+            qmp.write("test -t 0 && test -t 1 && echo tty > pty.txt\n")
+            qmp.write(f"wget -O link.txt http://10.0.2.2:{port}/probe\n")
+            time.sleep(0.5)
             qmp.write("sync\n")
-            time.sleep(0.35)
             if captures:
                 qmp.call("screendump", filename=str((captures / f"terminal-{architecture}.ppm").resolve()))
+
+            qmp.click(dock_x + dock_step // 2, h - 28)
+            qmp.pointer(w - 48, 334, True)
+            qmp.pointer(42, 334, True)
+            qmp.pointer(42, 334, False)
+            time.sleep(0.7)
+            # Page two contains Clock, Network and Settings.
+            cols = 4 if w >= 610 else 2
+            margin = 16 if w < 500 else 28
+            width = w - margin * 2
+            step = (width - (cols - 1) * 10) // cols
+            hero = 150 if h < 610 else 194
+            settings_x = margin + (2 % cols) * (step + 10) + step // 2
+            settings_y = 55 + 27 + hero + (2 // cols) * 106 + 48
+            qmp.click(settings_x, settings_y)
+            qmp.click(w // 2, 205)
+            wait_stage(serial, process, "greeter", 2)
+            qmp.write("tester\nwrongpass\n")
+            time.sleep(1.7)
+            assert serial.read_text(errors="replace").count("KreativeOS ready") == 1, "Bad password signed in"
+            qmp.write("english8\n")
+            wait_stage(serial, process, "ready", 2)
+            if architecture == "amd64":
+                qmp.pointer(w - 48, 334, True)
+                qmp.pointer(42, 334, True)
+                qmp.pointer(42, 334, False)
+                time.sleep(0.7)
+                qmp.click(settings_x, settings_y)
+                qmp.click(w // 2, 205)
+                wait_stage(serial, process, "greeter", 3)
+                qmp.click(w - margin - 45, 27)
+                qmp.write("guest\nguest789\nguest789\nenglish8\n")
+                wait_stage(serial, process, "ready", 3)
+                qmp.click(dock_x + dock_step * 5 // 2, h - 28)
+                time.sleep(0.65)
+                qmp.write("test -r /data/home/tester/bootnote.txt; echo $? > isolation.txt\n")
+                qmp.write("id -u > uid.txt\n")
+                qmp.write("sync\n")
+            time.sleep(0.4)
             try:
                 qmp.call("quit")
             except RuntimeError:
@@ -135,9 +213,21 @@ def exercise(architecture, qemu_data=None, captures=None):
             disk.seek(81 * 1024 * 1024)
             for _ in range(174):
                 data.write(disk.read(1024 * 1024))
-        assert disk_file(partition, "bootnote.txt") == "hello from kreativeos\n", "Notes did not persist"
-        assert disk_file(partition, "machine.txt").strip() == tag, "Terminal did not write the guest architecture"
-        print(f"PASS: {tag} UEFI, {w}x{h} GUI, Notes saved to ext4, shell executed uname")
+        checked = subprocess.run(["e2fsck", "-p", partition], capture_output=True, text=True)
+        assert checked.returncode in (0, 1), checked.stdout + checked.stderr
+        assert disk_file(partition, "home/tester/bootnote.txt") == "hello from kreativeos\n", "Notes did not persist"
+        machine = disk_file(partition, "home/tester/machine.txt").strip()
+        assert machine == tag, f"Terminal returned architecture {machine!r}, expected {tag!r}"
+        assert disk_file(partition, "home/tester/uid.txt").strip() == "1000", "Terminal did not use the owner's UID"
+        assert disk_file(partition, "home/tester/pty.txt").strip() == "tty", "Shell did not use a PTY"
+        assert disk_file(partition, "home/tester/link.txt") == "kreativeos-network-ok\n", "Ethernet transfer failed"
+        assert "tester:1000:$y$" in disk_file(partition, "system/accounts"), "Owner hash is missing"
+        if architecture == "amd64":
+            assert disk_file(partition, "home/guest/isolation.txt").strip() == "1", "Another account could read the owner's home"
+            assert disk_file(partition, "home/guest/uid.txt").strip() == "1001", "Second account UID is incorrect"
+            assert "guest:1001:$y$" in disk_file(partition, "system/accounts"), "Guest hash is missing"
+        print(f"PASS: {tag} UEFI, {w}x{h} GUI, login, private Notes, interactive PTY and Ethernet DHCP/HTTP")
+
 
 
 if __name__ == "__main__":

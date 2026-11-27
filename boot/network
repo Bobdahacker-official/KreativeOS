@@ -1,0 +1,34 @@
+#!/bin/sh
+mkdir -p /run/wpa_supplicant
+chmod 0700 /run/wpa_supplicant
+conf=/data/system/wifi.conf
+if [ ! -f "$conf" ]; then
+    (umask 077; printf 'ctrl_interface=/run/wpa_supplicant\nupdate_config=1\n' > "$conf")
+fi
+chmod 0600 "$conf"
+while :; do
+    for node in /sys/class/net/*; do
+        name=${node##*/}
+        case "$name" in ''|lo|*[!a-zA-Z0-9._-]*) continue;; esac
+        [ -r "$node/type" ] && [ "$(cat "$node/type")" = 1 ] || continue
+        if [ -d "$node/wireless" ] || [ -e "$node/phy80211" ]; then
+            if [ ! -S "/run/wpa_supplicant/$name" ]; then
+                ip link set "$name" up
+                if wpa_supplicant -B -i "$name" -c "$conf" -f "/run/wifi-$name.log"; then
+                    wpa_cli -B -p /run/wpa_supplicant -i "$name" -a /sbin/kos-wifi-event
+                    if wpa_cli -p /run/wpa_supplicant -i "$name" status | grep -q '^wpa_state=COMPLETED$'; then
+                        /sbin/kos-wifi-event "$name" CONNECTED
+                    fi
+                fi
+            fi
+        elif [ ! -s "/run/dhcp-$name.pid" ] && [ ! -e "/run/dhcp-start-$name" ]; then
+            ip link set "$name" up
+            (
+                touch "/run/dhcp-start-$name"
+                udhcpc -b -T 2 -i "$name" -s /sbin/kos-dhcp -p "/run/dhcp-$name.pid"
+                rm -f "/run/dhcp-start-$name"
+            ) &
+        fi
+    done
+    sleep 4
+done

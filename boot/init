@@ -3,17 +3,23 @@ export PATH=/bin:/sbin
 mount -t devtmpfs devtmpfs /dev
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
+mount -t cgroup2 cgroup2 /sys/fs/cgroup && mkdir -p /sys/fs/cgroup/kreative-session
 mount -t tmpfs -o mode=1777 tmpfs /tmp
-mount -t tmpfs tmpfs /run
+mount -t tmpfs -o mode=0755 tmpfs /run
 mkdir -p /dev/pts
-mount -t devpts devpts /dev/pts
+mount -t devpts -o newinstance,ptmxmode=0666,mode=0620 devpts /dev/pts
+ln -sf pts/ptmx /dev/ptmx
 exec </dev/console >/dev/console 2>&1
 
 # Bring up graphics, independent touch/keyboard input, and common boot media.
 for module in virtio_pci virtio_mmio virtio_blk virtio_gpu virtio_input \
               evdev crc32c_generic crc32c_intel ext4 simpledrm efifb usbhid hid_generic hid_multitouch xhci_pci xhci_plat_hcd \
               ehci_pci ohci_pci uhci_hcd usb_storage uas sd_mod ahci nvme \
-              sdhci_acpi sdhci_pci mmc_block; do
+              sdhci_acpi sdhci_pci mmc_block virtio_net e1000 e1000e igb igc r8169 r8152 \
+              asix ax88179_178a cdc_ether cdc_ncm lan78xx smsc95xx \
+              ccm cmac gcm ghash_generic aes_generic aesni_intel \
+              iwlwifi iwlmvm iwldvm ath9k ath9k_htc brcmfmac rtl8xxxu rtl8192cu rtw88_8822bu \
+              rtw88_8822ce rtw89_8852ae rtw89_8852be mt7921e mt7921u rt2800usb; do
     modprobe "$module" 2>/dev/null || echo "KreativeOS: driver $module unavailable"
 done
 
@@ -25,8 +31,6 @@ while [ "$tries" -lt 15 ]; do
     data=$(findfs LABEL=KOSDATA 2>/dev/null)
     if [ -b "$data" ] && mount -t ext4 -o nosuid,nodev,noexec "$data" /data; then
         mounted=1
-        chown 65534:65534 /data
-        chmod 0750 /data
         echo "KreativeOS: persistent storage mounted"
         break
     fi
@@ -35,10 +39,21 @@ while [ "$tries" -lt 15 ]; do
     tries=$((tries + 1))
 done
 if [ -z "$mounted" ]; then
-    mount -t tmpfs -o mode=0750,uid=65534,gid=65534 tmpfs /data
+    mount -t tmpfs -o mode=0750 tmpfs /data
     export KOS_VOLATILE=1
     echo 'KreativeOS: temporary storage active'
 fi
+if ! /bin/kreative-shell --prepare-accounts; then
+    echo "KreativeOS: unable to initialize the account database"
+    poweroff -f
+fi
+mdev -s
+ln -sf pts/ptmx /dev/ptmx
+chmod 0666 /dev/pts/ptmx
+mdev -d
+ip link set lo up
+/bin/kreative-shell --network-agent &
+/sbin/kos-network &
 for arg in $(cat /proc/cmdline); do
     case "$arg" in
         kos.rotate=0|kos.rotate=90|kos.rotate=180|kos.rotate=270) KOS_ROTATE=${arg#*=};;
@@ -64,6 +79,7 @@ while :; do
     fi
     ls /dev/fb* /dev/dri/* 2>/dev/null
     dmesg | grep -E "virtio|fb0|EXT4|module|symbol" | tail -25
+    [ "$result" -eq 43 ] && continue
     echo "KreativeOS: graphical session exited ($result). Retrying in 3 seconds."
     sleep 3
 done

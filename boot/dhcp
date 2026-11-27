@@ -1,0 +1,34 @@
+#!/bin/sh
+case "$interface" in ''|*[!a-zA-Z0-9._-]*) exit 1;; esac
+case "$1" in
+    deconfig)
+        ip -4 addr flush dev "$interface" scope global
+        rm -f "/run/dns-$interface"
+        ;;
+    bound|renew)
+        prefix=$(echo "${subnet:-255.255.255.0}" | awk -F. '
+            BEGIN { n[255]=8; n[254]=7; n[252]=6; n[248]=5; n[240]=4; n[224]=3; n[192]=2; n[128]=1; n[0]=0 }
+            NF == 4 { print n[$1]+n[$2]+n[$3]+n[$4] }')
+        [ -n "$prefix" ] || exit 1
+        ip -4 addr flush dev "$interface" scope global
+        ip addr add "$ip/$prefix" dev "$interface" || exit 1
+        metric=100
+        [ -e "/sys/class/net/$interface/phy80211" ] && metric=300
+        for gateway in $router; do
+            ip route replace default via "$gateway" dev "$interface" metric "$metric"
+            break
+        done
+        {
+            for server in $dns; do
+                case "$server" in ''|*[!0-9.]*) continue;; esac
+                printf 'nameserver %s\n' "$server"
+            done
+        } > "/run/dns-$interface"
+        ;;
+esac
+dnsfile=$(mktemp /run/.dns-XXXXXX) || exit 1
+chmod 0644 "$dnsfile"
+for source in /run/dns-*; do
+    [ -r "$source" ] && cat "$source"
+done > "$dnsfile"
+mv "$dnsfile" /run/resolv.conf
